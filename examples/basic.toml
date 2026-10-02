@@ -1,0 +1,8 @@
+[source]
+stage_type = "vyd::DummySource"
+
+[[stages]]
+stage_type = "vyd::DummyProcessor"
+
+[sink]
+stage_type = "vyd::DummySink"

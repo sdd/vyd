@@ -1,0 +1,15 @@
+[package]
+name = "vyd_main"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+documentation.workspace = true
+
+[dependencies]
+vyd = { workspace = true }
+
+clap = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ctrlc = "3.4.7"
