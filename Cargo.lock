@@ -1979,20 +1979,12 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vyd"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "arrow-array",
- "arrow-schema",
  "chrono",
  "dashmap",
  "image",
  "inventory",
- "once_cell",
- "parquet",
  "paste",
- "rand",
  "serde",
- "serde_arrow",
- "serde_json",
  "thiserror 2.0.21",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
@@ -2047,6 +2039,23 @@ dependencies = [
  "ctrlc",
  "tracing",
  "tracing-subscriber",
+ "vyd",
+]
+
+[[package]]
+name = "vyd_telemetry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow-schema",
+ "chrono",
+ "parquet",
+ "rand",
+ "serde",
+ "serde_arrow",
+ "serde_json",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
  "vyd",
 ]
 

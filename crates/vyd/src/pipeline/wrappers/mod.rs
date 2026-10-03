@@ -34,6 +34,9 @@ impl Stage<dyn FrameSource> {
     pub fn pipeline_ctx_init(&mut self, ctx: &mut PipelineContext) -> Result<(), VydError> {
         self.inner.pipeline_ctx_init(ctx)
     }
+    pub(crate) fn pipeline_finished(&mut self, ctx: &mut PipelineContext) -> Result<(), VydError> {
+        self.inner.pipeline_finished(ctx)
+    }
 }
 
 impl Stage<dyn FrameProcessor> {

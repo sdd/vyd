@@ -2,20 +2,16 @@ use std::any::Any;
 use std::collections::HashMap;
 
 pub mod annotations;
-pub mod dump_manager;
 pub mod error;
 pub mod frame;
-mod parquet_dumper;
 pub mod pipeline;
 pub mod stages;
 pub mod statistics;
 pub mod traits;
 
-pub use dump_manager::{DumpManager, RunMetadata};
 pub use error::VydError;
 pub use frame::Frame;
-pub use parquet_dumper::ParquetDumper;
-pub use traits::{Dumpable, FrameProcessor, FrameSink, FrameSource, StageFactory};
+pub use traits::{FrameProcessor, FrameSink, FrameSource, StageFactory};
 
 // needed for the exported macros to work without the consuming crate having to import them
 pub use inventory;

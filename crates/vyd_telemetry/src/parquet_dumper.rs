@@ -13,6 +13,7 @@ pub struct ParquetDumper<T: Dumpable> {
     buffer: Vec<T::Row>,
     file: Option<File>,
     fields: Option<Vec<Arc<Field>>>,
+    closed: bool,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -29,12 +30,13 @@ where
             buffer: Vec::new(),
             file: Some(file),
             fields: None,
+            closed: false,
             _phantom: Default::default(),
         })
     }
 
-    fn infer_schema_from_data(&mut self) -> Result<()> {
-        if self.fields.is_none() && !self.buffer.is_empty() {
+    fn infer_schema(&mut self) -> Result<()> {
+        if self.fields.is_none() {
             self.fields = Some(Vec::<FieldRef>::from_type::<T::Row>(
                 TracingOptions::default(),
             )?);
@@ -44,11 +46,14 @@ where
 
     fn ensure_writer(&mut self) -> Result<()> {
         if self.writer.is_none() {
-            self.infer_schema_from_data()?;
+            self.infer_schema()?;
 
             if let Some(ref fields) = self.fields {
                 let schema = Arc::new(ArrowSchema::new(fields.clone()));
-                let file = self.file.take().unwrap();
+                let file = self
+                    .file
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("parquet writer file is unavailable"))?;
                 let writer = parquet::arrow::ArrowWriter::try_new(file, schema, None)?;
                 self.writer = Some(writer);
             }
@@ -57,6 +62,7 @@ where
     }
 
     pub fn dump(&mut self, item: &T, frame_index: usize) -> Result<()> {
+        anyhow::ensure!(!self.closed, "parquet writer is closed");
         let row = item.to_row(self.run_id, frame_index);
         self.buffer.push(row);
 
@@ -73,6 +79,7 @@ where
         items: impl Iterator<Item = &'a T>,
         frame_index: usize,
     ) -> Result<()> {
+        anyhow::ensure!(!self.closed, "parquet writer is closed");
         items.for_each(|item| {
             let row = item.to_row(self.run_id, frame_index);
             self.buffer.push(row);
@@ -113,12 +120,16 @@ where
     }
 
     pub fn close(&mut self) -> Result<()> {
+        if self.closed {
+            return Ok(());
+        }
+        self.ensure_writer()?;
         self.flush()?;
+        self.closed = true;
 
         if let Some(writer) = self.writer.take() {
             writer.close()?;
         }
-
         Ok(())
     }
 }

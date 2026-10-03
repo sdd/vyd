@@ -18,6 +18,7 @@ pub struct RunMetadata {
 struct DumperHandle {
     value: Arc<dyn Any + Send + Sync>,
     flush: Box<dyn Fn() -> Result<()> + Send + Sync>,
+    close: Box<dyn Fn() -> Result<()> + Send + Sync>,
 }
 
 /// Manages all dumping operations for offline analysis
@@ -91,6 +92,7 @@ impl DumpManager {
             let path = self.run_dir.join(format!("{}.parquet", T::TABLE_NAME));
             let dumper = Arc::new(Mutex::new(ParquetDumper::<T>::new(&path, self.run_id)?));
             let for_flush = Arc::clone(&dumper);
+            let for_close = Arc::clone(&dumper);
             self.dumpers.insert(
                 T::TABLE_NAME,
                 DumperHandle {
@@ -100,6 +102,12 @@ impl DumpManager {
                             .lock()
                             .map_err(|e| anyhow::anyhow!("dumper lock poisoned: {e}"))?
                             .flush()
+                    }),
+                    close: Box::new(move || {
+                        for_close
+                            .lock()
+                            .map_err(|e| anyhow::anyhow!("dumper lock poisoned: {e}"))?
+                            .close()
                     }),
                 },
             );
@@ -118,6 +126,29 @@ impl DumpManager {
         Ok(())
     }
 
+    /// Finish every writer so files are readable even while dumper handles remain alive.
+    pub fn close_all(&mut self) -> Result<()> {
+        let mut first_error = None;
+        for dumper in self.dumpers.values() {
+            if let Err(error) = (dumper.close)() {
+                tracing::error!(?error, "Failed to close parquet writer");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Attach periodic flushing and finalization to a pipeline's lifecycle.
+    pub fn attach(self, ctx: &mut vyd::pipeline::PipelineContext) {
+        ctx.put("dump_manager", self);
+        ctx.add_observer(DumpObserver { frames: 0 });
+    }
+
     /// Get the run ID for this dump session
     pub fn run_id(&self) -> u64 {
         self.run_id
@@ -126,5 +157,58 @@ impl DumpManager {
     /// Get the run directory for this dump session
     pub fn run_dir(&self) -> &Path {
         &self.run_dir
+    }
+}
+
+struct DumpObserver {
+    frames: u64,
+}
+
+fn pipeline_error(error: impl std::fmt::Display) -> vyd::VydError {
+    vyd::VydError::GeneralPluginError(format!("telemetry: {error}"))
+}
+
+impl vyd::pipeline::PipelineObserver for DumpObserver {
+    fn pipeline_started(
+        &mut self,
+        ctx: &mut vyd::pipeline::PipelineContext,
+    ) -> Result<(), vyd::VydError> {
+        self.frames = 0;
+        ctx.try_get_as::<DumpManager>("dump_manager")?
+            .write_metadata()
+            .map_err(pipeline_error)
+    }
+
+    fn frame_processed(
+        &mut self,
+        _frame: &vyd::FrameContext,
+        ctx: &mut vyd::pipeline::PipelineContext,
+    ) -> Result<(), vyd::VydError> {
+        self.frames += 1;
+        if self.frames.is_multiple_of(100) {
+            ctx.try_get_as_mut::<DumpManager>("dump_manager")?
+                .flush_all()
+                .map_err(pipeline_error)?;
+        }
+        Ok(())
+    }
+
+    fn pipeline_finished(
+        &mut self,
+        ctx: &mut vyd::pipeline::PipelineContext,
+    ) -> Result<(), vyd::VydError> {
+        let snapshot = ctx
+            .try_get_as::<Arc<vyd::statistics::PipelineStatistics>>("pipeline_statistics")?
+            .snapshot();
+        let manager = ctx.try_get_as_mut::<DumpManager>("dump_manager")?;
+        let closed = manager.close_all();
+        let statistics = serde_json::to_vec_pretty(&snapshot)
+            .map_err(anyhow::Error::from)
+            .and_then(|data| {
+                std::fs::write(manager.run_dir().join("run_statistics.json"), data)
+                    .map_err(anyhow::Error::from)
+            });
+        // Attempt statistics export even if a writer failed to close.
+        closed.and(statistics).map_err(pipeline_error)
     }
 }

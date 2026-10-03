@@ -54,6 +54,10 @@ impl FrameBuffer {
         }
     }
 
+    pub fn clear_state_sender(&self) {
+        self.state_sender.lock().unwrap().take();
+    }
+
     pub fn set_state_sender(&self, sender: Sender<bool>) {
         let mut state_sender = self.state_sender.lock().unwrap();
         *state_sender = Some(sender);

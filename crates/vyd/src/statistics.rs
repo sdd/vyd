@@ -186,6 +186,24 @@ pub struct PipelineStatistics {
     pub memory_operations: Arc<DashMap<String, Arc<AtomicU64>>>,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct PipelineStatisticsSnapshot {
+    pub elapsed_us: u64,
+    pub frame_count: u64,
+    pub total_processing_time_us: u64,
+    pub stages: std::collections::BTreeMap<String, StageStatisticsSnapshot>,
+    pub memory_operations: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct StageStatisticsSnapshot {
+    pub call_count: u64,
+    pub total_time_us: u64,
+    pub min_time_us: Option<u64>,
+    pub max_time_us: Option<u64>,
+    pub median_time_us: Option<f64>,
+}
+
 impl Default for PipelineStatistics {
     fn default() -> Self {
         Self::new()
@@ -193,6 +211,40 @@ impl Default for PipelineStatistics {
 }
 
 impl PipelineStatistics {
+    /// Capture counters for export. Values may advance during an active run.
+    pub fn snapshot(&self) -> PipelineStatisticsSnapshot {
+        PipelineStatisticsSnapshot {
+            elapsed_us: self.start_time.elapsed().as_micros() as u64,
+            frame_count: self.frame_count.load(Ordering::Relaxed),
+            total_processing_time_us: self.total_processing_time_us.load(Ordering::Relaxed),
+            stages: self
+                .stage_timings
+                .iter()
+                .map(|entry| {
+                    let stats = entry.value();
+                    let calls = stats.call_count.load(Ordering::Relaxed);
+                    (
+                        entry.key().clone(),
+                        StageStatisticsSnapshot {
+                            call_count: calls,
+                            total_time_us: stats.total_time_us.load(Ordering::Relaxed),
+                            min_time_us: (calls > 0)
+                                .then(|| stats.min_time_us.load(Ordering::Relaxed)),
+                            max_time_us: (calls > 0)
+                                .then(|| stats.max_time_us.load(Ordering::Relaxed)),
+                            median_time_us: stats.get_median(),
+                        },
+                    )
+                })
+                .collect(),
+            memory_operations: self
+                .memory_operations
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().load(Ordering::Relaxed)))
+                .collect(),
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             start_time: Instant::now(),

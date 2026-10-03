@@ -1,9 +1,11 @@
+use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use toml::Value;
 use vyd::pipeline::{PipelineConfig, PipelineContext, build_pipeline, run_pipeline};
-use vyd::{DumpManager, Dumpable, VydError, register_vyd_frame_processor};
+use vyd::{VydError, register_vyd_frame_processor};
+use vyd_telemetry::{DumpManager, Dumpable};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct TestDataRow {
@@ -87,6 +89,30 @@ impl vyd::traits::FrameProcessor for DumpTestProcessor {
 register_vyd_frame_processor!(DumpTestProcessor);
 
 #[test]
+fn empty_dumps_close_to_readable_files_and_reject_later_writes() {
+    let directory = std::env::temp_dir().join(format!("vyd_empty_dump_{}", rand::random::<u64>()));
+    let mut manager = DumpManager::new(&directory).unwrap();
+    let dumper = manager.dumper::<TestData>().unwrap();
+    manager.close_all().unwrap();
+    manager.close_all().unwrap();
+    let reader =
+        SerializedFileReader::new(fs::File::open(directory.join("test_data.parquet")).unwrap())
+            .unwrap();
+    assert_eq!(reader.metadata().file_metadata().num_rows(), 0);
+    assert!(
+        dumper
+            .lock()
+            .unwrap()
+            .dump(&TestData { value: 1 }, 0)
+            .is_err()
+    );
+    drop(reader);
+    drop(dumper);
+    drop(manager);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn test_dump_functionality() {
     // Create a test pipeline configuration
     let toml_config = r#"
@@ -95,7 +121,7 @@ stage_type = "vyd::DummySource"
 frame_count = 10
 
 [[stages]]
-stage_type = "vyd::DumpTestProcessor"
+stage_type = "vyd_telemetry::DumpTestProcessor"
 
 [sink]
 stage_type = "vyd::DummySink"
@@ -126,7 +152,7 @@ stage_type = "vyd::DummySink"
         .expect("Failed to write metadata");
 
     // Store the dump manager in the pipeline context
-    pipeline_context.put("dump_manager", dump_manager);
+    dump_manager.attach(&mut pipeline_context);
 
     // Run the pipeline
     let final_context = run_pipeline(pipeline_context, pipeline, None).unwrap();
@@ -153,6 +179,15 @@ stage_type = "vyd::DummySink"
 
     let parquet_path = dump_manager.run_dir().join("test_data.parquet");
     assert!(parquet_path.exists(), "Parquet file was not created");
+    // The footer must be readable while the manager and its writer handles are alive.
+    let reader = SerializedFileReader::new(fs::File::open(&parquet_path).unwrap()).unwrap();
+    assert_eq!(reader.metadata().file_metadata().num_rows(), 5);
+
+    let snapshot: serde_json::Value = serde_json::from_slice(
+        &fs::read(dump_manager.run_dir().join("run_statistics.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(snapshot["frame_count"], 5);
 
     // Check that the metadata file exists
     let metadata_path = dump_manager.run_dir().join("run_metadata.json");
@@ -160,8 +195,9 @@ stage_type = "vyd::DummySink"
 
     println!("Parquet file path: {}", parquet_path.display());
 
-    // Clean up
-    // let _ = fs::remove_dir_all(dump_manager.run_dir());
+    drop(reader);
+    drop(final_context);
+    fs::remove_dir_all(&temp_dir).unwrap();
 
     println!("Dump functionality test completed successfully!");
     println!("  Frames sourced: {}", frames_sourced);

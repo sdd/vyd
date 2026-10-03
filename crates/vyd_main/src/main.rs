@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .expect("Error setting Ctrl-C handler");
 
-    run_pipeline_with_config_file_path(&config.config, stats.clone(), None)?;
+    run_pipeline_with_config_file_path(&config.config, stats.clone())?;
 
     // If we reach here, the pipeline completed naturally
     stats.print_final_stats();

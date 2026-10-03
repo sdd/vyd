@@ -1,7 +1,6 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -10,6 +9,7 @@ use toml::Value;
 
 pub(crate) mod timing;
 pub(crate) mod wrappers;
+pub use wrappers::Stage;
 
 use crate::pipeline::timing::log_frame_timing_summary;
 use crate::pipeline::wrappers::{FrameProcessorWrapper, FrameSinkWrapper, FrameSourceWrapper};
@@ -19,9 +19,40 @@ use crate::{FrameProcessorResult, VydError};
 
 pub type PipelineContextValue = Box<dyn Any + Send + Sync>;
 
-#[derive(Debug)]
 pub struct PipelineContext {
     metadata: HashMap<String, PipelineContextValue>,
+    observers: Vec<Box<dyn PipelineObserver>>,
+}
+
+impl std::fmt::Debug for PipelineContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PipelineContext")
+            .field("metadata_keys", &self.metadata.keys().collect::<Vec<_>>())
+            .field("observer_count", &self.observers.len())
+            .finish()
+    }
+}
+
+/// Lifecycle hooks for telemetry, logging, or other pipeline extensions.
+/// Started hooks run before stage initialization. Finished hooks run after stage
+/// finalizers, including when initialization or a frame hook returns an error.
+pub trait PipelineObserver: Send + Sync {
+    fn pipeline_started(&mut self, _ctx: &mut PipelineContext) -> Result<(), VydError> {
+        Ok(())
+    }
+
+    /// Called for every sourced frame, including frames skipped by a processor.
+    fn frame_processed(
+        &mut self,
+        _frame: &crate::FrameContext,
+        _ctx: &mut PipelineContext,
+    ) -> Result<(), VydError> {
+        Ok(())
+    }
+
+    fn pipeline_finished(&mut self, _ctx: &mut PipelineContext) -> Result<(), VydError> {
+        Ok(())
+    }
 }
 
 impl Default for PipelineContext {
@@ -34,7 +65,12 @@ impl PipelineContext {
     pub fn new() -> Self {
         Self {
             metadata: HashMap::new(),
+            observers: Vec::new(),
         }
+    }
+
+    pub fn add_observer(&mut self, observer: impl PipelineObserver + 'static) {
+        self.observers.push(Box::new(observer));
     }
 
     pub fn entry<K: Into<String>>(&mut self, key: K) -> Entry<'_, String, PipelineContextValue> {
@@ -102,6 +138,12 @@ pub struct PipelineConfig {
     sink: StageConfig,
 }
 
+impl PipelineConfig {
+    pub fn source_type(&self) -> &str {
+        &self.source.stage_type
+    }
+}
+
 #[derive(Deserialize, Debug)]
 struct StageConfig {
     #[allow(unused)]
@@ -113,9 +155,9 @@ struct StageConfig {
 }
 
 pub struct Pipeline {
-    pub source: FrameSourceWrapper,
-    pub stages: Vec<FrameProcessorWrapper>,
-    pub sink: FrameSinkWrapper,
+    pub source: Stage<dyn FrameSource>,
+    pub stages: Vec<Stage<dyn FrameProcessor>>,
+    pub sink: Stage<dyn FrameSink>,
 }
 
 impl std::fmt::Debug for Pipeline {
@@ -297,161 +339,128 @@ pub fn run_pipeline(
         mut stages,
         mut sink,
     } = pipeline;
-
-    let stats = match stats {
-        Some(stats) => stats,
-        _ => Arc::new(PipelineStatistics::new()),
-    };
-
-    // Set up global statistics context
+    let stats = stats.unwrap_or_else(|| Arc::new(PipelineStatistics::new()));
+    pipeline_context.put("pipeline_statistics", stats.clone());
     StatsContext::set_global_stats(stats.clone());
+    let _stats_scope = StatisticsScope;
 
-    // Auto-register all stage processing types
-    stats.register_stage("source", source.get_processing_type());
+    stats.register_stage(source.stage_type, source.get_processing_type());
     for stage in &stages {
         stats.register_stage(stage.stage_type, stage.get_processing_type());
     }
-    stats.register_stage("sink", sink.processing_type());
+    stats.register_stage(sink.stage_type, sink.processing_type());
 
-    // Add statistics to pipeline context if provided
-    pipeline_context.put("pipeline_statistics", stats.clone());
-
-    tracing::info!("Initializing pipeline context");
-    let init_result = (|| {
-        source.pipeline_ctx_init(&mut pipeline_context)?;
-        for stage in stages.iter_mut() {
-            stage.pipeline_ctx_init(&mut pipeline_context)?;
-        }
-        sink.pipeline_ctx_init(&mut pipeline_context)
-    })();
-    if let Err(error) = init_result {
-        StatsContext::clear_global_stats();
-        return Err(error);
-    }
-    tracing::info!(?pipeline_context, "pipeline context initialized");
-
+    let mut observers = std::mem::take(&mut pipeline_context.observers);
+    let mut observers_started = 0;
+    let mut source_started = false;
+    let mut stages_started = 0;
+    let mut sink_started = false;
     let pipeline_start = Instant::now();
     let mut frame_count = 0u64;
 
-    while let Some(mut ctx) = source.next_frame(&mut pipeline_context) {
-        // Check if we should stop (for Ctrl+C handling)
-        if !stats.is_running() {
-            tracing::info!("Received shutdown signal, stopping pipeline gracefully");
-            break;
+    let result = (|| {
+        for observer in &mut observers {
+            observers_started += 1;
+            observer.pipeline_started(&mut pipeline_context)?;
         }
+        source_started = true;
+        source.pipeline_ctx_init(&mut pipeline_context)?;
+        for stage in &mut stages {
+            stages_started += 1;
+            stage.pipeline_ctx_init(&mut pipeline_context)?;
+        }
+        sink_started = true;
+        sink.pipeline_ctx_init(&mut pipeline_context)?;
 
-        let frame_start = Instant::now();
-        frame_count += 1;
-
-        let mut continue_processing = true;
-        for stage in stages.iter_mut() {
-            if matches!(
-                stage.process(&mut ctx, &mut pipeline_context),
-                FrameProcessorResult::Skip
-            ) {
-                continue_processing = false;
+        while stats.is_running() {
+            let Some(mut frame) = source.next_frame(&mut pipeline_context) else {
                 break;
-            }
-        }
-
-        if continue_processing {
-            sink.consume(&mut ctx, &mut pipeline_context);
-        }
-
-        let total_frame_duration = frame_start.elapsed();
-        let total_frame_duration_us = total_frame_duration.as_micros() as u64;
-
-        // Record statistics if available
-        stats.record_frame(total_frame_duration_us);
-
-        // Log comprehensive timing summary for this frame
-        log_frame_timing_summary(&ctx, frame_count, total_frame_duration_us);
-
-        // Log periodic throughput stats and flush dumpers
-        if frame_count.is_multiple_of(100) {
-            let elapsed = pipeline_start.elapsed();
-            let fps = frame_count as f64 / elapsed.as_secs_f64();
-
-            tracing::info!(
-                frames_processed = frame_count,
-                elapsed_seconds = elapsed.as_secs_f64(),
-                fps,
-                "Pipeline throughput"
-            );
-
-            // Periodically flush the dump manager to ensure data is written to disk
-            if let Ok(dm) =
-                pipeline_context.try_get_as_mut::<crate::dump_manager::DumpManager>("dump_manager")
-            {
-                if let Err(e) = dm.flush_all() {
-                    tracing::warn!(error = ?e, "Failed to flush dump manager");
+            };
+            let frame_start = Instant::now();
+            frame_count += 1;
+            let mut continue_processing = true;
+            for stage in &mut stages {
+                if matches!(
+                    stage.process(&mut frame, &mut pipeline_context),
+                    FrameProcessorResult::Skip
+                ) {
+                    continue_processing = false;
+                    break;
                 }
             }
+            if continue_processing {
+                sink.consume(&mut frame, &mut pipeline_context);
+            }
+            let duration_us = frame_start.elapsed().as_micros() as u64;
+            stats.record_frame(duration_us);
+            log_frame_timing_summary(&frame, frame_count, duration_us);
+            for observer in &mut observers {
+                observer.frame_processed(&frame, &mut pipeline_context)?;
+            }
+            if frame_count.is_multiple_of(100) {
+                let elapsed = pipeline_start.elapsed().as_secs_f64();
+                tracing::info!(
+                    frames_processed = frame_count,
+                    elapsed_seconds = elapsed,
+                    fps = frame_count as f64 / elapsed,
+                    "Pipeline throughput"
+                );
+            }
         }
-    }
+        Ok(())
+    })();
 
-    let total_duration = pipeline_start.elapsed();
-    let fps = frame_count as f64 / total_duration.as_secs_f64();
+    // Attempt every finalizer even if a preceding hook or finalizer failed.
+    let mut failure = result.err();
+    let mut finish = |result: Result<(), VydError>| {
+        if let Err(error) = result {
+            tracing::error!(?error, "Pipeline finalizer failed");
+            if failure.is_none() {
+                failure = Some(error);
+            }
+        }
+    };
+    if source_started {
+        finish(source.pipeline_finished(&mut pipeline_context));
+    }
+    for stage in stages.iter_mut().take(stages_started) {
+        finish(stage.pipeline_finished(&mut pipeline_context));
+    }
+    if sink_started {
+        finish(sink.pipeline_finished(&mut pipeline_context));
+    }
+    for observer in observers.iter_mut().take(observers_started) {
+        finish(observer.pipeline_finished(&mut pipeline_context));
+    }
+    pipeline_context.observers.splice(0..0, observers);
 
     tracing::info!(
         total_frames = frame_count,
-        total_duration_seconds = total_duration.as_secs_f64(),
-        average_fps = fps,
-        "Pipeline completed"
+        total_duration_seconds = pipeline_start.elapsed().as_secs_f64(),
+        "Pipeline finished"
     );
-
-    for stage in stages.iter_mut() {
-        if let Err(err) = stage.pipeline_finished(&mut pipeline_context) {
-            tracing::error!("Error while running pipeline stage finalizer: {}", err);
-        }
+    if let Some(error) = failure {
+        return Err(error);
     }
-
-    if let Err(err) = sink.pipeline_finished(&mut pipeline_context) {
-        tracing::error!("Error while running pipeline sink finalizer: {}", err);
-    }
-
-    // Clean up global stats when pipeline completes
-    StatsContext::clear_global_stats();
-
-    if let Ok(dm) =
-        pipeline_context.try_get_as_mut::<crate::dump_manager::DumpManager>("dump_manager")
-    {
-        dm.flush_all()
-            .map_err(|e| VydError::GeneralPluginError(format!("dump flush failed: {e}")))?;
-    }
-
     Ok(pipeline_context)
+}
+
+struct StatisticsScope;
+impl Drop for StatisticsScope {
+    fn drop(&mut self) {
+        StatsContext::clear_global_stats();
+    }
 }
 
 pub fn run_pipeline_with_config_file_path(
     path: &std::path::Path,
     stats: Arc<PipelineStatistics>,
-    dump_dir: Option<PathBuf>,
 ) -> Result<PipelineContext, VydError> {
     let config_raw = std::fs::read_to_string(path)?;
     let config: PipelineConfig = toml::from_str(&config_raw)?;
-    let pipeline = build_pipeline(&config)?;
-    let mut pipeline_context = PipelineContext::new();
-
-    // If dump_dir is provided, store the config content in the DumpManager
-    if let Some(dump_dir) = dump_dir {
-        let dm = crate::dump_manager::DumpManager::new(&dump_dir).map_err(|e| {
-            VydError::GeneralPluginError(format!("dump directory setup failed: {e}"))
-        })?;
-        // Store the config content
-        let dm = dm.with_config(config_raw.clone());
-
-        // Attempt to extract source information from config
-        let dm = dm.with_source(config.source.stage_type.clone());
-
-        tracing::info!(dump_dir = ?dump_dir, "Initialized dump manager");
-
-        dm.write_metadata().map_err(|e| {
-            VydError::GeneralPluginError(format!("dump metadata write failed: {e}"))
-        })?;
-
-        pipeline_context.put("dump_manager", dm);
-    }
-
-    run_pipeline(pipeline_context, pipeline, Some(stats))
+    run_pipeline(
+        PipelineContext::new(),
+        build_pipeline(&config)?,
+        Some(stats),
+    )
 }
