@@ -304,7 +304,6 @@ pub fn run_pipeline(
     };
 
     // Set up global statistics context
-    pipeline_context.put("pipeline_statistics", stats.clone());
     StatsContext::set_global_stats(stats.clone());
 
     // Auto-register all stage processing types
@@ -340,9 +339,6 @@ pub fn run_pipeline(
             tracing::info!("Received shutdown signal, stopping pipeline gracefully");
             break;
         }
-
-        // Process any GStreamer timing data that came with this frame
-        crate::pipeline::timing::process_gst_timing_data(&ctx, Some(stats.as_ref()));
 
         let frame_start = Instant::now();
         frame_count += 1;
@@ -387,8 +383,6 @@ pub fn run_pipeline(
             if let Ok(dm) =
                 pipeline_context.try_get_as_mut::<crate::dump_manager::DumpManager>("dump_manager")
             {
-                // We need to get a mutable reference, but we only have immutable access through try_get_as
-                // Instead of changing the API, we'll drop and re-access it with entry()
                 if let Err(e) = dm.flush_all() {
                     tracing::warn!(error = ?e, "Failed to flush dump manager");
                 }
@@ -422,9 +416,8 @@ pub fn run_pipeline(
     if let Ok(dm) =
         pipeline_context.try_get_as_mut::<crate::dump_manager::DumpManager>("dump_manager")
     {
-        if let Err(e) = dm.flush_all() {
-            tracing::warn!(error = ?e, "Failed to flush dump manager");
-        }
+        dm.flush_all()
+            .map_err(|e| VydError::GeneralPluginError(format!("dump flush failed: {e}")))?;
     }
 
     Ok(pipeline_context)
@@ -441,31 +434,21 @@ pub fn run_pipeline_with_config_file_path(
     let mut pipeline_context = PipelineContext::new();
 
     // If dump_dir is provided, store the config content in the DumpManager
-    if let Some(dump_dir) = dump_dir
-        && let Ok(dm) = crate::dump_manager::DumpManager::new(&dump_dir)
-    {
+    if let Some(dump_dir) = dump_dir {
+        let dm = crate::dump_manager::DumpManager::new(&dump_dir).map_err(|e| {
+            VydError::GeneralPluginError(format!("dump directory setup failed: {e}"))
+        })?;
         // Store the config content
         let dm = dm.with_config(config_raw.clone());
 
         // Attempt to extract source information from config
-        let dm = if let Some(source_name) = config
-            .source
-            .params
-            .as_ref()
-            .and_then(|v| v.get("file"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-        {
-            dm.with_source(source_name)
-        } else {
-            dm
-        };
+        let dm = dm.with_source(config.source.stage_type.clone());
 
         tracing::info!(dump_dir = ?dump_dir, "Initialized dump manager");
 
-        if let Err(e) = dm.write_metadata() {
-            tracing::warn!(error = ?e, "Failed to write dump metadata");
-        }
+        dm.write_metadata().map_err(|e| {
+            VydError::GeneralPluginError(format!("dump metadata write failed: {e}"))
+        })?;
 
         pipeline_context.put("dump_manager", dm);
     }

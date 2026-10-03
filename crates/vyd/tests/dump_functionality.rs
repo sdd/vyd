@@ -61,12 +61,13 @@ impl vyd::traits::FrameProcessor for DumpTestProcessor {
                 .expect("dump_manager is not a DumpManager");
 
             // Dump the data for this frame
-            if let Err(e) = dump_manager
-                .dumper::<TestData>()
-                .lock()
-                .unwrap()
-                .dump(&test_data, frame_ctx.frame_index)
-            {
+            let result = dump_manager.dumper::<TestData>().and_then(|dumper| {
+                dumper
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("dumper lock poisoned: {e}"))?
+                    .dump(&test_data, frame_ctx.frame_index)
+            });
+            if let Err(e) = result {
                 tracing::warn!(error = ?e, "Failed to dump test data");
             }
         }

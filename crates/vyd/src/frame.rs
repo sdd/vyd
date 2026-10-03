@@ -23,8 +23,8 @@ pub enum FrameError {
     #[error("GPU upload not yet implemented")]
     GpuUploadNotImplemented,
 
-    #[error("Cannot operate on Frame::None")]
-    FrameIsNone,
+    #[error("Frame buffer is unavailable")]
+    BufferUnavailable,
 
     #[error("Invalid frame dimensions: {width}x{height} with {data_len} bytes")]
     InvalidDimensions {
@@ -37,19 +37,20 @@ pub enum FrameError {
     GpuConversionRequired,
 }
 
-/// GPU pixel formats supported by the pipeline
+/// Pixel formats supported by frame backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GpuPixelFormat {
+pub enum PixelFormat {
     Nv12,
     Luma8,
 }
+
+pub type GpuPixelFormat = PixelFormat;
 
 /// The unified Frame type.
 #[derive(Clone)]
 pub enum Frame {
     Cpu(CpuFrame),
     Gpu(Arc<dyn GpuFrame>),
-    None,
 }
 
 pub type CpuImgBuf = ImageBuffer<Luma<u8>, CpuStorage>;
@@ -83,8 +84,8 @@ pub trait CpuStorageShared: Deref<Target = [u8]> + Send + Sync + 'static {
 
 /// Internal storage variants - implementation detail hidden from users
 enum StorageInner {
-    /// Owned mutable storage backed by a Vec<u8>
-    Owned(Vec<u8>),
+    /// Heap storage shared until a writer requests mutable access.
+    Owned(Arc<Vec<u8>>),
     /// Immutable shared storage (e.g., from a frame buffer pool)
     Shared(Box<dyn CpuStorageShared>),
 }
@@ -92,7 +93,7 @@ enum StorageInner {
 impl Clone for StorageInner {
     fn clone(&self) -> Self {
         match self {
-            StorageInner::Owned(v) => StorageInner::Owned(v.clone()),
+            StorageInner::Owned(v) => StorageInner::Owned(Arc::clone(v)),
             StorageInner::Shared(shared) => StorageInner::Shared(shared.clone_shared()),
         }
     }
@@ -108,7 +109,7 @@ impl CpuStorage {
     /// Create new owned storage from a Vec<u8>
     pub fn from_vec(vec: Vec<u8>) -> Self {
         Self {
-            inner: StorageInner::Owned(vec),
+            inner: StorageInner::Owned(Arc::new(vec)),
         }
     }
 
@@ -126,14 +127,26 @@ impl CpuStorage {
     /// to heap allocation if necessary.
     pub fn to_owned(self) -> Self {
         match self.inner {
-            StorageInner::Owned(_) => self, // Already owned
+            StorageInner::Owned(data) => {
+                if Arc::strong_count(&data) == 1 {
+                    Self {
+                        inner: StorageInner::Owned(data),
+                    }
+                } else {
+                    StatsContext::record_memory_operation(MemoryOperation::CpuCopy(data.len()));
+                    StatsContext::record_memory_operation(MemoryOperation::CpuAllocation(
+                        data.len(),
+                    ));
+                    Self::from_vec((*data).clone())
+                }
+            }
             StorageInner::Shared(shared) => Self::convert_shared_to_owned(shared),
         }
     }
 
     /// Check if this storage is currently in owned form
     pub fn is_owned(&self) -> bool {
-        matches!(self.inner, StorageInner::Owned(_))
+        matches!(&self.inner, StorageInner::Owned(data) if Arc::strong_count(data) == 1)
     }
 
     /// Internal helper to convert shared storage to owned
@@ -146,7 +159,7 @@ impl CpuStorage {
                 tracing::info!("Successfully stole buffer from pool, zero-copy conversion");
                 StatsContext::record_memory_operation(MemoryOperation::ZeroCopyReference);
                 Self {
-                    inner: StorageInner::Owned(vec),
+                    inner: StorageInner::Owned(Arc::new(vec)),
                 }
             }
             Err(shared) => {
@@ -166,7 +179,7 @@ impl CpuStorage {
                 StatsContext::record_memory_operation(MemoryOperation::CpuAllocation(data_len));
                 let vec = (&**shared).to_vec();
                 Self {
-                    inner: StorageInner::Owned(vec),
+                    inner: StorageInner::Owned(Arc::new(vec)),
                 }
             }
         }
@@ -186,7 +199,9 @@ impl CpuStorage {
             }
             StorageInner::Owned(vec) => {
                 // Convert to shared storage
-                let shared_vec = SharedVec::new(vec.clone());
+                let shared_vec = SharedVec {
+                    inner: Arc::clone(vec),
+                };
                 CpuStorage::from_shared(shared_vec)
             }
         }
@@ -198,7 +213,7 @@ impl Deref for CpuStorage {
 
     fn deref(&self) -> &Self::Target {
         match &self.inner {
-            StorageInner::Owned(v) => v,
+            StorageInner::Owned(v) => v.as_slice(),
             StorageInner::Shared(shared) => &**shared,
         }
     }
@@ -210,10 +225,19 @@ impl DerefMut for CpuStorage {
     /// This will convert shared storage to owned storage using the most efficient
     /// method available (steal > pool lease > heap allocation).
     fn deref_mut(&mut self) -> &mut Self::Target {
-        *self = std::mem::take(self).to_owned();
+        if matches!(self.inner, StorageInner::Shared(_)) {
+            *self = std::mem::take(self).to_owned();
+        }
 
         match &mut self.inner {
-            StorageInner::Owned(v) => v,
+            StorageInner::Owned(v) => {
+                if Arc::strong_count(v) > 1 {
+                    let bytes = v.len();
+                    StatsContext::record_memory_operation(MemoryOperation::CpuCopy(bytes));
+                    StatsContext::record_memory_operation(MemoryOperation::CpuAllocation(bytes));
+                }
+                Arc::make_mut(v).as_mut_slice()
+            }
             StorageInner::Shared(_) => unreachable!("to_owned should always return owned"),
         }
     }
@@ -333,7 +357,14 @@ pub trait GpuFrame: Send + Sync + fmt::Debug {
 
 impl CpuFrame {
     pub fn from_vec(width: u32, height: u32, v: Vec<u8>) -> Result<Self, FrameError> {
-        let expected_len = (width * height) as usize;
+        let expected_len = width
+            .checked_mul(height)
+            .map(|pixels| pixels as usize)
+            .ok_or(FrameError::InvalidDimensions {
+                width,
+                height,
+                data_len: v.len(),
+            })?;
         if v.len() != expected_len {
             return Err(FrameError::InvalidDimensions {
                 width,
@@ -353,7 +384,14 @@ impl CpuFrame {
         height: u32,
         v: impl CpuStorageShared,
     ) -> Result<Self, FrameError> {
-        let expected_len = (width * height) as usize;
+        let expected_len = width
+            .checked_mul(height)
+            .map(|pixels| pixels as usize)
+            .ok_or(FrameError::InvalidDimensions {
+                width,
+                height,
+                data_len: v.len(),
+            })?;
         if v.len() != expected_len {
             return Err(FrameError::InvalidDimensions {
                 width,
@@ -392,8 +430,8 @@ impl CpuFrame {
     }
 
     /// Get the total number of pixels
-    pub fn pixel_count(&self) -> u32 {
-        self.width() * self.height()
+    pub fn pixel_count(&self) -> u64 {
+        u64::from(self.width()) * u64::from(self.height())
     }
 
     pub fn to_shared(self) -> CpuFrame {
@@ -403,7 +441,7 @@ impl CpuFrame {
             StorageInner::Shared(shared) => CpuStorage {
                 inner: StorageInner::Shared(shared),
             },
-            StorageInner::Owned(v) => CpuStorage::from_shared(SharedVec::new(v)),
+            StorageInner::Owned(v) => CpuStorage::from_shared(SharedVec { inner: v }),
         };
         CpuFrame {
             img: ImageBuffer::<Luma<u8>, _>::from_raw(width, height, storage).unwrap(),
@@ -424,7 +462,6 @@ impl fmt::Debug for Frame {
                 .field("w", &g.width())
                 .field("h", &g.height())
                 .finish(),
-            Frame::None => f.debug_struct("Frame::None").finish(),
         }
     }
 }
@@ -455,11 +492,17 @@ impl Frame {
     }
 
     /// Get frame dimensions as a tuple
-    pub fn dimensions(&self) -> Option<(u32, u32)> {
+    pub fn dimensions(&self) -> (u32, u32) {
         match self {
-            Frame::Cpu(c) => Some(c.dimensions()),
-            Frame::Gpu(g) => Some((g.width(), g.height())),
-            Frame::None => None,
+            Frame::Cpu(c) => c.dimensions(),
+            Frame::Gpu(g) => (g.width(), g.height()),
+        }
+    }
+
+    pub fn pixel_format(&self) -> PixelFormat {
+        match self {
+            Frame::Cpu(_) => PixelFormat::Luma8,
+            Frame::Gpu(g) => g.pixel_format(),
         }
     }
 
@@ -473,17 +516,11 @@ impl Frame {
         matches!(self, Frame::Gpu(_))
     }
 
-    /// Check if this frame is None
-    pub fn is_none(&self) -> bool {
-        matches!(self, Frame::None)
-    }
-
     /// Get the total number of pixels, if available
-    pub fn pixel_count(&self) -> Option<u32> {
+    pub fn pixel_count(&self) -> u64 {
         match self {
-            Frame::Cpu(c) => Some(c.pixel_count()),
-            Frame::Gpu(g) => Some(g.width() * g.height()),
-            Frame::None => None,
+            Frame::Cpu(c) => u64::from(c.width()) * u64::from(c.height()),
+            Frame::Gpu(g) => u64::from(g.width()) * u64::from(g.height()),
         }
     }
 
@@ -528,6 +565,7 @@ impl Frame {
     pub fn to_cpu(&self, timeout: Option<Duration>) -> Result<CpuFrame, FrameError> {
         match self {
             Frame::Cpu(c) => {
+                // CpuStorage clones share their backing allocation and copy only on mutation.
                 StatsContext::record_memory_operation(MemoryOperation::ZeroCopyReference);
                 Ok(c.clone())
             }
@@ -536,7 +574,6 @@ impl Frame {
                 StatsContext::record_memory_operation(MemoryOperation::GpuDownload(bytes));
                 g.sync_and_download(timeout)
             }
-            Frame::None => Err(FrameError::FrameIsNone),
         }
     }
 
@@ -570,7 +607,6 @@ impl Frame {
         match self {
             Frame::Cpu(c) => Ok(c),
             Frame::Gpu(g) => g.sync_and_download(timeout),
-            Frame::None => Err(FrameError::FrameIsNone),
         }
     }
 
@@ -606,17 +642,13 @@ impl Frame {
         match self {
             Frame::Cpu(cpu_frame) => {
                 let (width, height) = cpu_frame.dimensions();
-                // Access the storage by cloning the ImageBuffer and extracting the storage
-                let cloned_img = cpu_frame.img.clone();
-                let storage = cloned_img.into_raw(); // This gives us CpuStorage
-                let shared_storage = storage.clone_shared();
+                let shared_storage = cpu_frame.img.as_raw().clone_shared();
 
                 let img = ImageBuffer::from_raw(width, height, shared_storage)
                     .expect("Failed to create ImageBuffer from shared storage");
                 Frame::Cpu(CpuFrame { img })
             }
             Frame::Gpu(gpu) => Frame::Gpu(Arc::clone(gpu)),
-            Frame::None => Frame::None,
         }
     }
 }
@@ -668,16 +700,36 @@ mod tests {
     #[test]
     fn convenience_methods() {
         let frame = Frame::from_raw(10, 5, vec![42; 50]).unwrap();
-        assert_eq!(frame.dimensions(), Some((10, 5)));
-        assert_eq!(frame.pixel_count(), Some(50));
+        assert_eq!(frame.dimensions(), (10, 5));
+        assert_eq!(frame.pixel_count(), 50);
+        assert_eq!(frame.pixel_format(), PixelFormat::Luma8);
         assert!(frame.is_cpu());
         assert!(!frame.is_gpu());
-        assert!(!frame.is_none());
     }
 
     #[test]
     fn invalid_dimensions() {
         let result = CpuFrame::from_vec(10, 10, vec![0; 50]);
         assert!(matches!(result, Err(FrameError::InvalidDimensions { .. })));
+        let overflow = CpuFrame::from_vec(u32::MAX, u32::MAX, vec![]);
+        assert!(matches!(
+            overflow,
+            Err(FrameError::InvalidDimensions { .. })
+        ));
+    }
+
+    #[test]
+    fn cpu_clones_share_until_mutated() {
+        let frame = Frame::from_raw(2, 1, vec![1, 2]).unwrap();
+        let mut copy = frame.to_cpu(None).unwrap();
+        let original = frame.as_cpu_frame().unwrap();
+        assert_eq!(copy.img.as_raw().as_ptr(), original.img.as_raw().as_ptr());
+        copy.img.as_mut()[0] = 9;
+        assert_eq!(&original.img.as_raw()[..], &[1, 2]);
+        assert_eq!(&copy.img.as_raw()[..], &[9, 2]);
+        assert_ne!(copy.img.as_raw().as_ptr(), original.img.as_raw().as_ptr());
+        let detached = copy.img.as_raw().as_ptr();
+        copy.img.as_mut()[1] = 8;
+        assert_eq!(copy.img.as_raw().as_ptr(), detached);
     }
 }

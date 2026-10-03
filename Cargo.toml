@@ -2,6 +2,8 @@
 members = [
     "crates/vyd",
     "crates/vyd_main",
+    "crates/vyd_gstreamer",
+    "crates/vyd_gstreamer_gpu",
 ]
 resolver = "2"
 

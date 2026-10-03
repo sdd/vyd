@@ -1,17 +1,5 @@
 const TRACING_TARGET: &str = "vyd_timing";
 
-/// Helper function to process GStreamer timing data from frame context
-pub(crate) fn process_gst_timing_data(
-    frame_ctx: &crate::FrameContext,
-    pipeline_stats: Option<&crate::statistics::PipelineStatistics>,
-) {
-    if let Some(stats) = pipeline_stats {
-        if let Ok(timing_data) = frame_ctx.try_get_as::<Vec<(u64, String)>>("timing_data") {
-            stats.record_gst_timing_data(timing_data);
-        }
-    }
-}
-
 /// Helper function to add vyd stage timing to existing timing data (in microseconds)
 #[allow(unused)]
 pub(crate) fn add_stage_timing(
@@ -29,8 +17,8 @@ pub(crate) fn add_stage_timing(
         .unwrap_or_default()
         .as_micros() as u64;
 
-    // Add vyd-level timing with a prefix to distinguish from GST timing
-    let event_name = format!("vyd_{}", stage_name);
+    // Add pipeline timing with a prefix to distinguish from source timing
+    let event_name = format!("pipeline_{}", stage_name);
     timing_data.push((timestamp_us, event_name));
 
     tracing::trace!(
@@ -40,7 +28,7 @@ pub(crate) fn add_stage_timing(
         duration_us,
         timestamp_us,
         total_timing_events = timing_data.len(),
-        "vyd_pipeline.stage_latency_us"
+        "pipeline.stage_latency_us"
     );
 }
 
@@ -61,7 +49,7 @@ pub(crate) fn get_or_create_timing_data(
         .unwrap()
 }
 
-/// Helper function to log timing summary exactly like GST's print_timing_summary
+/// Helper function to log timing summary for one frame
 pub(crate) fn log_frame_timing_summary(
     frame_ctx: &crate::FrameContext,
     frame_count: u64,

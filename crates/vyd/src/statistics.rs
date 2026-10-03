@@ -272,107 +272,6 @@ impl PipelineStatistics {
         stats.record_timing(timing_us);
     }
 
-    /// Record GStreamer pipeline timing data from frame context
-    pub fn record_gst_timing_data(&self, timing_data: &[(u64, String)]) {
-        use once_cell::sync::Lazy;
-        use std::collections::HashSet;
-
-        // Elements that commonly don't have matching entry/exit pairs due to their nature
-        static TIMING_EXEMPT_PATTERNS: Lazy<HashSet<&'static str>> =
-            Lazy::new(|| ["src", "sink", "bin", "demux"].into_iter().collect());
-
-        // Group events by stage and calculate durations between entry and exit
-        let mut stage_entries = std::collections::HashMap::new();
-
-        for (timestamp_us, event_name) in timing_data {
-            // Parse stage name and event type from format "gst_stagename_entry" or "gst_stagename_exit"
-            if let Some(stage_and_event) = event_name.strip_prefix("gst_") {
-                if let Some((stage_name, event_type)) = stage_and_event.rsplit_once('_') {
-                    match event_type {
-                        "entry" => {
-                            // Record entry time for this stage
-                            stage_entries.insert(stage_name.to_string(), *timestamp_us);
-                        }
-                        "exit" => {
-                            // Look for matching entry and calculate duration
-                            if let Some(entry_time) = stage_entries.remove(stage_name) {
-                                let duration_us = timestamp_us.saturating_sub(entry_time);
-
-                                // Create a clean stage name for display
-                                let clean_stage_name = format!("gst_{}", stage_name);
-
-                                // Record the timing
-                                self.record_stage_timing(&clean_stage_name, duration_us);
-
-                                tracing::trace!(
-                                    stage = stage_name,
-                                    duration_us,
-                                    entry_time,
-                                    exit_time = timestamp_us,
-                                    "Recorded GST stage duration"
-                                );
-                            } else {
-                                // Only warn if the element doesn't contain timing-exempt patterns
-                                let is_exempt = TIMING_EXEMPT_PATTERNS
-                                    .iter()
-                                    .any(|pattern| stage_name.contains(pattern));
-
-                                if !is_exempt {
-                                    tracing::warn!(
-                                        stage = stage_name,
-                                        "Found exit event without matching entry event"
-                                    );
-                                }
-                            }
-                        }
-                        _ => {
-                            tracing::warn!(
-                                event_name,
-                                "Unknown GST event type, expected 'entry' or 'exit'"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Warn about any unmatched entry events (except timing-exempt elements)
-        for (stage_name, _entry_time) in stage_entries {
-            let is_exempt = TIMING_EXEMPT_PATTERNS
-                .iter()
-                .any(|pattern| stage_name.contains(pattern));
-
-            if !is_exempt {
-                tracing::warn!(
-                    stage = stage_name,
-                    "Found entry event without matching exit event"
-                );
-            }
-        }
-    }
-
-    /// Clean up GStreamer stage names to be consistent with vyd naming
-    #[allow(unused)]
-    fn clean_gst_stage_name(&self, stage_name: &str) -> String {
-        // Remove common GST prefixes and suffixes
-        let cleaned = stage_name
-            .trim_start_matches("gst")
-            .trim_start_matches("_")
-            .replace("_", "")
-            .replace("-", "");
-
-        // Capitalize first letter to match vyd conventions
-        if cleaned.is_empty() {
-            stage_name.to_string()
-        } else {
-            let mut chars = cleaned.chars();
-            match chars.next() {
-                None => stage_name.to_string(),
-                Some(first) => first.to_uppercase().chain(chars).collect(),
-            }
-        }
-    }
-
     pub fn stop(&self) {
         self.is_running.store(false, Ordering::Relaxed);
     }
@@ -389,42 +288,6 @@ impl PipelineStatistics {
         } else {
             full_name
         }
-    }
-
-    /// Separate stages into GStreamer and Vyd categories
-    #[allow(unused)]
-    fn categorize_stages(
-        &self,
-    ) -> (
-        Vec<(String, StageTimingStats, f64)>,
-        Vec<(String, StageTimingStats, f64)>,
-    ) {
-        let mut gst_stages = Vec::new();
-        let mut vyd_stages = Vec::new();
-
-        for entry in self.stage_timings.iter() {
-            let stage_name = entry.key();
-            let stats = entry.value().clone();
-            let median_time_us = stats.get_median().unwrap_or(0.0);
-
-            // Determine if this is a GST stage or vyd stage based on prefix
-            let display_name = Self::extract_stage_name(stage_name);
-
-            if stage_name.starts_with("gst_") {
-                // This is a GStreamer stage - remove the gst_ prefix for display
-                let clean_name = stage_name.strip_prefix("gst_").unwrap_or(stage_name);
-                gst_stages.push((clean_name.to_string(), stats, median_time_us));
-            } else {
-                // This is an Vyd pipeline stage
-                vyd_stages.push((display_name.to_string(), stats, median_time_us));
-            }
-        }
-
-        // Sort by median time (descending)
-        gst_stages.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
-        vyd_stages.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
-
-        (gst_stages, vyd_stages)
     }
 
     /// Get memory operation summary for a stage
@@ -515,8 +378,8 @@ impl PipelineStatistics {
 
     /// Enhanced stage data structure for table rendering
     fn get_enhanced_stage_data(&self) -> (Vec<EnhancedStageData>, Vec<EnhancedStageData>) {
-        let mut gst_stages = Vec::new();
-        let mut vyd_stages = Vec::new();
+        let mut external_stages = Vec::new();
+        let mut pipeline_stages = Vec::new();
 
         for entry in self.stage_timings.iter() {
             let stage_name = entry.key();
@@ -528,16 +391,16 @@ impl PipelineStatistics {
                 .stage_processing_types
                 .get(stage_name)
                 .map(|pt| *pt.value())
-                .unwrap_or(ProcessingType::Cpu); // Default to CPU for GST stages
+                .unwrap_or(ProcessingType::Cpu);
 
             // Get memory operations summary
             let memory_summary = self.get_memory_summary(stage_name);
 
             let enhanced_data = EnhancedStageData {
                 name: stage_name.clone(),
-                display_name: if stage_name.starts_with("gst_") {
+                display_name: if stage_name.starts_with("external/") {
                     stage_name
-                        .strip_prefix("gst_")
+                        .strip_prefix("external/")
                         .unwrap_or(stage_name)
                         .to_string()
                 } else {
@@ -549,18 +412,18 @@ impl PipelineStatistics {
                 memory_summary,
             };
 
-            if stage_name.starts_with("gst_") {
-                gst_stages.push(enhanced_data);
+            if stage_name.starts_with("external/") {
+                external_stages.push(enhanced_data);
             } else {
-                vyd_stages.push(enhanced_data);
+                pipeline_stages.push(enhanced_data);
             }
         }
 
         // Sort by median time (descending)
-        gst_stages.sort_by(|a, b| b.median_time_us.partial_cmp(&a.median_time_us).unwrap());
-        vyd_stages.sort_by(|a, b| b.median_time_us.partial_cmp(&a.median_time_us).unwrap());
+        external_stages.sort_by(|a, b| b.median_time_us.partial_cmp(&a.median_time_us).unwrap());
+        pipeline_stages.sort_by(|a, b| b.median_time_us.partial_cmp(&a.median_time_us).unwrap());
 
-        (gst_stages, vyd_stages)
+        (external_stages, pipeline_stages)
     }
 
     fn print_stage_table(
@@ -674,7 +537,7 @@ impl PipelineStatistics {
 
         // Print detailed stage-specific timings with enhanced information
         if !self.stage_timings.is_empty() {
-            let (gst_stages, vyd_stages) = self.get_enhanced_stage_data();
+            let (external_stages, pipeline_stages) = self.get_enhanced_stage_data();
 
             let total_stage_time_us: u64 = self
                 .stage_timings
@@ -682,15 +545,12 @@ impl PipelineStatistics {
                 .map(|entry| entry.value().total_time_us.load(Ordering::Relaxed))
                 .sum();
 
-            // Print GStreamer stages first
             self.print_stage_table(
-                "GStreamer Pipeline Stages",
-                &gst_stages,
+                "External Stage Timings",
+                &external_stages,
                 total_stage_time_us,
             );
-
-            // Then print Vyd stages
-            self.print_stage_table("Vyd Pipeline Stages", &vyd_stages, total_stage_time_us);
+            self.print_stage_table("Pipeline Stages", &pipeline_stages, total_stage_time_us);
 
             // Print memory operation legend
             println!("\nMemory Operation Legend:");

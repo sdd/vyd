@@ -1,6 +1,5 @@
 use std::any::Any;
 use std::collections::HashMap;
-use std::mem::swap;
 
 pub mod annotations;
 pub mod dump_manager;
@@ -12,7 +11,7 @@ pub mod stages;
 pub mod statistics;
 pub mod traits;
 
-pub use dump_manager::DumpManager;
+pub use dump_manager::{DumpManager, RunMetadata};
 pub use error::VydError;
 pub use frame::Frame;
 pub use parquet_dumper::ParquetDumper;
@@ -61,12 +60,6 @@ impl FrameContext {
 
     pub fn put<T: Any + Send + Sync + 'static>(&mut self, key: &str, value: T) {
         self.metadata.insert(key.to_string(), Box::new(value));
-    }
-
-    pub fn take_frame(&mut self) -> Frame {
-        let mut f = Frame::None;
-        swap(&mut f, &mut self.frame);
-        f
     }
 }
 

@@ -96,12 +96,13 @@ impl FrameProcessor for DummyProcessor {
 
         // Check if we have a dump manager in the pipeline context
         if let Ok(dump_manager) = ctx.try_get_as_mut::<DumpManager>("dump_manager") {
-            if let Err(err) = dump_manager
-                .dumper::<ExampleData>()
-                .lock()
-                .unwrap()
-                .dump(&example_data, frame_ctx.frame_index)
-            {
+            let result = dump_manager.dumper::<ExampleData>().and_then(|dumper| {
+                dumper
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("dumper lock poisoned: {e}"))?
+                    .dump(&example_data, frame_ctx.frame_index)
+            });
+            if let Err(err) = result {
                 tracing::error!("Failed to dump example data: {:?}", err);
             }
         };

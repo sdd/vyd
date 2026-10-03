@@ -16,4 +16,11 @@ The example uses the built-in dummy source, processor, and sink. It processes fi
 cargo test --workspace
 ```
 
-The workspace contains the reusable `vyd` library and the example CLI.
+The workspace contains:
+
+- `vyd`: pipeline orchestration, stage interfaces, Luma8 CPU/GPU frame handles, statistics, run metadata, and Parquet dumping.
+- `vyd_gstreamer`: generic file and RTSP frame sources with pooled CPU buffers.
+- `vyd_gstreamer_gpu`: experimental GPU buffer path. Its current source still assumes 1920×1080 Luma8 frames.
+- `vyd_main`: example CLI.
+
+The GStreamer crates require the matching system GStreamer libraries. Vidd is not published to crates.io yet.

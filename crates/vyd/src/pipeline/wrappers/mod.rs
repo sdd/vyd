@@ -1,29 +1,30 @@
 use crate::pipeline::PipelineContext;
-use crate::statistics::PipelineStatistics;
-use crate::statistics::{ProcessingType, StatsContext};
+use crate::statistics::{PipelineStatistics, ProcessingType, StatsContext};
 use crate::traits::{FrameProcessor, FrameSink, FrameSource};
 use crate::{FrameContext, FrameProcessorResult, VydError};
 use std::sync::Arc;
 use std::time::Instant;
 
-pub struct FrameSourceWrapper {
-    pub inner: Box<dyn FrameSource>,
+/// Common storage for a configured pipeline stage, tagged with its registered name.
+pub struct Stage<T: ?Sized> {
+    pub inner: Box<T>,
     pub stage_type: &'static str,
 }
 
-impl FrameSourceWrapper {
-    pub fn new(inner: Box<dyn FrameSource>, stage_type: &'static str) -> Self {
+impl<T: ?Sized> Stage<T> {
+    pub fn new(inner: Box<T>, stage_type: &'static str) -> Self {
         Self { inner, stage_type }
     }
+}
 
+pub type FrameSourceWrapper = Stage<dyn FrameSource>;
+pub type FrameProcessorWrapper = Stage<dyn FrameProcessor>;
+pub type FrameSinkWrapper = Stage<dyn FrameSink>;
+
+impl Stage<dyn FrameSource> {
     pub fn next_frame(&mut self, ctx: &mut PipelineContext) -> Option<FrameContext> {
-        // Set current stage context for Frame operations
-        StatsContext::set_current_stage(self.stage_type.to_string());
-
-        let result = self.inner.next_frame(ctx);
-
-        StatsContext::clear_current_stage();
-        result
+        let _scope = StageScope::new(self.stage_type);
+        self.inner.next_frame(ctx)
     }
 
     pub fn get_processing_type(&self) -> ProcessingType {
@@ -35,35 +36,16 @@ impl FrameSourceWrapper {
     }
 }
 
-pub struct FrameProcessorWrapper {
-    pub inner: Box<dyn FrameProcessor>,
-    pub stage_type: &'static str,
-}
-
-impl FrameProcessorWrapper {
-    pub fn new(inner: Box<dyn FrameProcessor>, stage_type: &'static str) -> Self {
-        Self { inner, stage_type }
-    }
-
+impl Stage<dyn FrameProcessor> {
     pub fn process(
         &mut self,
         frame_ctx: &mut FrameContext,
         ctx: &mut PipelineContext,
     ) -> FrameProcessorResult {
+        let _scope = StageScope::new(self.stage_type);
         let start_time = Instant::now();
-
-        // Set current stage context for Frame operations
-        StatsContext::set_current_stage(self.stage_type.to_string());
-
         let result = self.inner.process(frame_ctx, ctx);
-        let duration_us = start_time.elapsed().as_micros() as u64;
-
-        // Record timing if statistics are available
-        if let Ok(stats) = ctx.try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics") {
-            stats.record_stage_timing(self.stage_type, duration_us);
-        }
-
-        StatsContext::clear_current_stage();
+        record_duration(ctx, self.stage_type, start_time);
         result
     }
 
@@ -80,32 +62,12 @@ impl FrameProcessorWrapper {
     }
 }
 
-pub struct FrameSinkWrapper {
-    pub inner: Box<dyn FrameSink>,
-    pub stage_type: &'static str,
-}
-
-impl FrameSinkWrapper {
-    pub fn new(inner: Box<dyn FrameSink>, stage_type: &'static str) -> Self {
-        Self { inner, stage_type }
-    }
-}
-
-impl FrameSink for FrameSinkWrapper {
+impl FrameSink for Stage<dyn FrameSink> {
     fn consume(&mut self, frame_ctx: &mut FrameContext, ctx: &mut PipelineContext) {
+        let _scope = StageScope::new(self.stage_type);
         let start_time = Instant::now();
-
-        StatsContext::set_current_stage(self.stage_type.to_string());
-
         self.inner.consume(frame_ctx, ctx);
-        let duration_us = start_time.elapsed().as_micros() as u64;
-
-        // Record timing if statistics are available
-        if let Ok(stats) = ctx.try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics") {
-            stats.record_stage_timing(self.stage_type, duration_us);
-        }
-
-        StatsContext::clear_current_stage();
+        record_duration(ctx, self.stage_type, start_time);
     }
 
     fn pipeline_ctx_init(&mut self, ctx: &mut PipelineContext) -> Result<(), VydError> {
@@ -122,5 +84,26 @@ impl FrameSink for FrameSinkWrapper {
 
     fn processing_type(&self) -> ProcessingType {
         self.inner.processing_type()
+    }
+}
+
+struct StageScope;
+
+impl StageScope {
+    fn new(stage_type: &'static str) -> Self {
+        StatsContext::set_current_stage(stage_type.to_string());
+        Self
+    }
+}
+
+impl Drop for StageScope {
+    fn drop(&mut self) {
+        StatsContext::clear_current_stage();
+    }
+}
+
+fn record_duration(ctx: &PipelineContext, stage_type: &'static str, start_time: Instant) {
+    if let Ok(stats) = ctx.try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics") {
+        stats.record_stage_timing(stage_type, start_time.elapsed().as_micros() as u64);
     }
 }
