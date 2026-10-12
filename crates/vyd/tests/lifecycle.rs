@@ -13,7 +13,7 @@ fn error(message: &str) -> VydError {
     VydError::GeneralPluginError(message.into())
 }
 
-struct Source(Events, usize);
+struct Source(Events, usize, bool);
 impl FrameSource for Source {
     fn pipeline_ctx_init(&mut self, _: &mut PipelineContext) -> Result<(), VydError> {
         record(&self.0, "source.init");
@@ -28,6 +28,16 @@ impl FrameSource for Source {
             Frame::from_raw(1, 1, vec![0]).unwrap(),
             self.1,
         ))
+    }
+    fn try_next_frame(
+        &mut self,
+        ctx: &mut PipelineContext,
+    ) -> Result<Option<FrameContext>, VydError> {
+        if self.2 {
+            record(&self.0, "source.error");
+            return Err(error("source failed"));
+        }
+        Ok(self.next_frame(ctx))
     }
     fn pipeline_finished(&mut self, _: &mut PipelineContext) -> Result<(), VydError> {
         record(&self.0, "source.finish");
@@ -44,6 +54,7 @@ struct Processor {
     events: Events,
     fail_init: bool,
     skip: bool,
+    fail_process: bool,
 }
 impl FrameProcessor for Processor {
     fn pipeline_ctx_init(&mut self, _: &mut PipelineContext) -> Result<(), VydError> {
@@ -65,6 +76,17 @@ impl FrameProcessor for Processor {
         record(&self.events, "processor.finish");
         Err(error("finalizer failed"))
     }
+    fn try_process(
+        &mut self,
+        frame: &mut FrameContext,
+        ctx: &mut PipelineContext,
+    ) -> Result<FrameProcessorResult, VydError> {
+        if self.fail_process {
+            record(&self.events, "processor.error");
+            return Err(error("processor failed"));
+        }
+        Ok(self.process(frame, ctx))
+    }
     fn name(&self) -> &str {
         "processor"
     }
@@ -72,7 +94,7 @@ impl FrameProcessor for Processor {
         ProcessingType::Cpu
     }
 }
-struct Sink(Events);
+struct Sink(Events, bool);
 impl FrameSink for Sink {
     fn pipeline_ctx_init(&mut self, _: &mut PipelineContext) -> Result<(), VydError> {
         record(&self.0, "sink.init");
@@ -80,6 +102,18 @@ impl FrameSink for Sink {
     }
     fn consume(&mut self, _: &mut FrameContext, _: &mut PipelineContext) {
         record(&self.0, "sink.consume");
+    }
+    fn try_consume(
+        &mut self,
+        frame: &mut FrameContext,
+        ctx: &mut PipelineContext,
+    ) -> Result<(), VydError> {
+        if self.1 {
+            record(&self.0, "sink.error");
+            return Err(error("sink failed"));
+        }
+        self.consume(frame, ctx);
+        Ok(())
     }
     fn pipeline_finished(&mut self, _: &mut PipelineContext) -> Result<(), VydError> {
         record(&self.0, "sink.finish");
@@ -119,16 +153,17 @@ impl PipelineObserver for Observer {
 }
 fn pipeline(events: &Events, fail_init: bool, skip: bool) -> Pipeline {
     Pipeline {
-        source: Stage::new(Box::new(Source(events.clone(), 2)), "source"),
+        source: Stage::new(Box::new(Source(events.clone(), 2, false)), "source"),
         stages: vec![Stage::new(
             Box::new(Processor {
                 events: events.clone(),
                 fail_init,
                 skip,
+                fail_process: false,
             }),
             "processor",
         )],
-        sink: Stage::new(Box::new(Sink(events.clone())), "sink"),
+        sink: Stage::new(Box::new(Sink(events.clone(), false)), "sink"),
     }
 }
 fn context(events: &Events, fail_frame: bool) -> PipelineContext {
@@ -205,4 +240,65 @@ fn skipped_frames_reach_observers_and_finalizer_errors_reach_caller() {
     );
     assert!(!events.contains(&"sink.consume"));
     assert_eq!(events.last(), Some(&"observer.finish"));
+}
+
+#[test]
+fn frame_call_errors_are_distinct_from_eos_and_skip_and_finalize_every_stage() {
+    for (stage, operation, expected) in [
+        ("source", "next_frame", "source failed"),
+        ("processor", "process", "processor failed"),
+        ("sink", "consume", "sink failed"),
+    ] {
+        let events = Events::default();
+        let mut pipeline = pipeline(&events, false, false);
+        match stage {
+            "source" => {
+                pipeline.source = Stage::new(Box::new(Source(events.clone(), 2, true)), "source")
+            }
+            "processor" => {
+                pipeline.stages[0] = Stage::new(
+                    Box::new(Processor {
+                        events: events.clone(),
+                        fail_init: false,
+                        skip: false,
+                        fail_process: true,
+                    }),
+                    "processor",
+                )
+            }
+            "sink" => pipeline.sink = Stage::new(Box::new(Sink(events.clone(), true)), "sink"),
+            _ => unreachable!(),
+        }
+        let result = run_pipeline(context(&events, false), pipeline, None);
+        match result {
+            Err(VydError::StageFailed {
+                stage: actual_stage,
+                operation: actual_operation,
+                source,
+            }) => {
+                assert_eq!(actual_stage, stage);
+                assert_eq!(actual_operation, operation);
+                assert!(
+                    matches!(*source, VydError::GeneralPluginError(ref message) if message == expected)
+                );
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+        let events = events.lock().unwrap();
+        assert_eq!(
+            &events[events.len() - 4..],
+            &[
+                "source.finish",
+                "processor.finish",
+                "sink.finish",
+                "observer.finish"
+            ]
+        );
+        // A frame whose processing failed is not a completed observer event.
+        assert!(!events.contains(&"observer.frame"));
+        assert!(!events.contains(&"sink.consume"));
+        if stage == "source" {
+            assert!(!events.contains(&"processor.process"));
+        }
+    }
 }

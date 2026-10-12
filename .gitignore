@@ -1,2 +1,7 @@
 /target
-.migration/
+/.idea/
+.DS_Store
+.vscode/
+node_modules/
+lcov.info
+coverage/

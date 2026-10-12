@@ -1,11 +1,17 @@
 [package]
-name = "vyd_gstreamer_gpu"
+name = "vyd-gstreamer-gpu"
 version = "0.1.0"
 edition = "2021"
+authors.workspace = true
+description = "Experimental GStreamer GPU buffer integration for Vyd"
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+documentation = "https://docs.rs/vyd-gstreamer-gpu"
 
 [dependencies]
 vyd = { workspace = true }
-vyd_gstreamer = { path = "../vyd_gstreamer" }
+vyd_gstreamer = { package = "vyd-gstreamer", path = "../vyd_gstreamer", version = "0.1.0" }
 bytes = "1"
 gst = { package = "gstreamer", version = "0.21", features = ["v1_20"] }
 gst-allocators = { package = "gstreamer-allocators", version = "0.21.2" }

@@ -3,14 +3,14 @@ use gst::prelude::*;
 use gst::Pipeline;
 use std::sync::Arc;
 
-use crate::frame_buffer_pool::{create_shared_pool, SharedFrameBufferPool};
+use crate::managed_pool::ManagedFramePool;
 use crate::vyd_frame_queue::VydFrameQueue;
 use crate::vyd_gst_sink::VydGstSink;
 
 pub fn build_file_pipeline(
     path: &str,
     ring_buffer: Arc<VydFrameQueue>,
-    pool: Option<SharedFrameBufferPool>,
+    pool: Option<Arc<ManagedFramePool>>,
 ) -> Result<Pipeline> {
     let pipeline_str = format!("filesrc location={} ! decodebin", path);
     build_generic_pipeline(&pipeline_str, ring_buffer, pool)
@@ -19,7 +19,7 @@ pub fn build_file_pipeline(
 pub fn build_rtsp_client_pipeline(
     uri: &str, // Changed from &Uri to &str to match caller
     ring_buffer: Arc<VydFrameQueue>,
-    pool: Option<SharedFrameBufferPool>,
+    pool: Option<Arc<ManagedFramePool>>,
 ) -> Result<Pipeline> {
     let pipeline_str = format!("rtspsrc location={} ! decodebin", uri);
     build_generic_pipeline(&pipeline_str, ring_buffer, pool)
@@ -29,7 +29,7 @@ pub fn build_rtsp_client_pipeline(
 fn build_generic_pipeline(
     source_pipeline: &str,
     ring_buffer: Arc<VydFrameQueue>,
-    pool: Option<SharedFrameBufferPool>,
+    pool: Option<Arc<ManagedFramePool>>,
 ) -> Result<Pipeline> {
     let pipeline = gst::parse_launch(source_pipeline)?;
     let pipeline = pipeline
@@ -43,7 +43,7 @@ fn build_generic_pipeline(
 
     let vydsink = VydGstSink::new();
     if let Some(pool) = pool {
-        vydsink.set_frame_buffer_pool(pool);
+        vydsink.set_managed_pool(pool);
     }
 
     // Set sync=false for maximum speed processing

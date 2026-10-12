@@ -1,8 +1,14 @@
+// wgpu's device/queue auto-traits add depth to RuntimeState's Send proof when
+// Vyd's GPU feature is enabled alongside this GST runtime.
+#![recursion_limit = "256"]
+
 mod config;
 pub mod frame_buffer_pool;
 mod gst_buffer_timing_meta;
 mod gst_pipeline;
 pub mod gst_source;
+pub mod managed_pool;
+pub mod runtime;
 pub mod vyd_frame_queue;
 pub mod vyd_gst_allocator;
 pub mod vyd_gst_buffer_pool;

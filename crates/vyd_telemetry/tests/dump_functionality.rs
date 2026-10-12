@@ -203,3 +203,81 @@ stage_type = "vyd::DummySink"
     println!("  Frames sourced: {}", frames_sourced);
     println!("  Frames sunk: {}", frames_sunk);
 }
+
+#[test]
+fn processor_error_closes_dump_and_exports_statistics() {
+    struct FailingProcessor;
+    impl vyd::FrameProcessor for FailingProcessor {
+        fn process(
+            &mut self,
+            _: &mut vyd::FrameContext,
+            _: &mut PipelineContext,
+        ) -> vyd::FrameProcessorResult {
+            panic!("runtime must call the fallible hook");
+        }
+        fn try_process(
+            &mut self,
+            frame: &mut vyd::FrameContext,
+            ctx: &mut PipelineContext,
+        ) -> Result<vyd::FrameProcessorResult, VydError> {
+            DumpTestProcessor.process(frame, ctx);
+            Err(VydError::GeneralPluginError(
+                "processing failed after dump".into(),
+            ))
+        }
+        fn name(&self) -> &str {
+            "failing"
+        }
+        fn processing_type(&self) -> vyd::statistics::ProcessingType {
+            vyd::statistics::ProcessingType::Cpu
+        }
+    }
+    let directory = std::env::temp_dir().join(format!("vyd_failed_dump_{}", rand::random::<u64>()));
+    let mut manager = DumpManager::new(&directory).unwrap();
+    let dumper = manager.dumper::<TestData>().unwrap();
+    let mut ctx = PipelineContext::new();
+    manager.attach(&mut ctx);
+    let config = toml::from_str(
+        r#"
+        [source]
+        stage_type = "vyd::DummySource"
+        [sink]
+        stage_type = "vyd::DummySink"
+    "#,
+    )
+    .unwrap();
+    let mut pipeline = build_pipeline(&config).unwrap();
+    pipeline.stages.push(vyd::pipeline::Stage::new(
+        Box::new(FailingProcessor),
+        "failing",
+    ));
+    let result = run_pipeline(ctx, pipeline, None);
+    assert!(matches!(
+        result,
+        Err(VydError::StageFailed {
+            stage: "failing",
+            operation: "process",
+            ..
+        })
+    ));
+    let reader =
+        SerializedFileReader::new(fs::File::open(directory.join("test_data.parquet")).unwrap())
+            .unwrap();
+    assert_eq!(reader.metadata().file_metadata().num_rows(), 1);
+    assert!(
+        dumper
+            .lock()
+            .unwrap()
+            .dump(&TestData { value: 10 }, 1)
+            .is_err()
+    );
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&fs::read(directory.join("run_statistics.json")).unwrap()).unwrap();
+    assert_eq!(snapshot["frame_count"], 0);
+    assert_eq!(snapshot["stages"]["failing"]["call_count"], 1);
+    let _: serde_json::Value =
+        serde_json::from_slice(&fs::read(directory.join("run_metadata.json")).unwrap()).unwrap();
+    drop(reader);
+    drop(dumper);
+    fs::remove_dir_all(directory).unwrap();
+}
