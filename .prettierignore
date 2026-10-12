@@ -1,0 +1,2 @@
+# release-plz generates these files and uses a different Markdown emphasis style.
+crates/*/CHANGELOG.md
