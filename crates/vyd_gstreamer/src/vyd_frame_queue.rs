@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
-use vyd::Frame;
+use vyd::{Frame, FrameTiming};
 
 #[allow(dead_code)]
 pub struct FrameInfo {
@@ -18,6 +18,7 @@ pub struct FrameInfo {
 pub struct FrameWithTiming {
     pub frame: Frame,
     pub timing_data: Option<Vec<(u64, String)>>,
+    pub media_timing: FrameTiming,
 }
 
 /// `FrameBuffer` buffers frames between stages.
@@ -77,6 +78,15 @@ impl VydFrameQueue {
         frame: Frame,
         timing_data: Option<Vec<(u64, String)>>,
     ) -> Result<(), &'static str> {
+        self.write_frame_with_metadata(frame, timing_data, FrameTiming::default())
+    }
+
+    pub fn write_frame_with_metadata(
+        &self,
+        frame: Frame,
+        timing_data: Option<Vec<(u64, String)>>,
+        media_timing: FrameTiming,
+    ) -> Result<(), &'static str> {
         let mut buffer = self.buffer.lock().unwrap();
         let buffer_len = buffer.len();
 
@@ -110,7 +120,11 @@ impl VydFrameQueue {
             }
         }
 
-        let frame_with_timing = FrameWithTiming { frame, timing_data };
+        let frame_with_timing = FrameWithTiming {
+            frame,
+            timing_data,
+            media_timing,
+        };
 
         buffer.push_back(frame_with_timing);
         drop(buffer);

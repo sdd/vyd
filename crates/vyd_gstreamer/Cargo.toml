@@ -1,7 +1,17 @@
 [package]
-name = "vyd_gstreamer"
+name = "vyd-gstreamer"
 version = "0.1.0"
 edition = "2021"
+authors.workspace = true
+description = "GStreamer sources and sinks for Vyd video pipelines"
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+documentation = "https://docs.rs/vyd-gstreamer"
+
+[features]
+default = []
+gpu-wgpu = ["vyd/gpu-wgpu"]
 
 [dependencies]
 vyd = { workspace = true }
@@ -18,3 +28,7 @@ toml = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+vyd_telemetry = { package = "vyd-telemetry", path = "../vyd_telemetry", version = "0.1.0" }
+serde_json = { workspace = true }

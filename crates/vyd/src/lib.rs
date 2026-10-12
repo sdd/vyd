@@ -1,9 +1,16 @@
+#![cfg_attr(feature = "gpu-wgpu", recursion_limit = "256")]
+
 use std::any::Any;
 use std::collections::HashMap;
+use std::time::Duration;
 
 pub mod annotations;
+pub mod caps;
 pub mod error;
 pub mod frame;
+pub mod frame_metadata;
+#[cfg(feature = "gpu-wgpu")]
+pub mod gpu;
 pub mod pipeline;
 pub mod stages;
 pub mod statistics;
@@ -18,18 +25,34 @@ pub use inventory;
 pub use paste;
 pub use toml;
 
+/// Source media time for a frame, independent of stage processing time.
+/// Missing fields mean the source did not supply that timestamp. The values
+/// travel with the frame's identity through the supported linear graph.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FrameTiming {
+    pub presentation_timestamp: Option<Duration>,
+    pub decode_timestamp: Option<Duration>,
+    pub duration: Option<Duration>,
+}
+
 pub struct FrameContext {
     pub metadata: HashMap<String, Box<dyn Any + Send + Sync>>,
+    pub typed_metadata: frame_metadata::TypedFrameMetadata,
     pub frame: Frame,
+    /// Source-assigned identity in the supported linear stream. Stages must
+    /// preserve it when replacing pixels; skips may leave gaps.
     pub frame_index: usize,
+    pub timing: FrameTiming,
 }
 
 impl FrameContext {
     pub fn new(frame: Frame, frame_index: usize) -> Self {
         Self {
             metadata: HashMap::new(),
+            typed_metadata: frame_metadata::TypedFrameMetadata::new(),
             frame,
             frame_index,
+            timing: FrameTiming::default(),
         }
     }
 
@@ -56,6 +79,16 @@ impl FrameContext {
 
     pub fn put<T: Any + Send + Sync + 'static>(&mut self, key: &str, value: T) {
         self.metadata.insert(key.to_string(), Box::new(value));
+    }
+
+    /// Store an immutable annotation. A value must not own this context's
+    /// attached pixel buffer when transported through GST.
+    pub fn put_typed<T: Any + Send + Sync>(&mut self, value: T) {
+        self.typed_metadata.insert(value);
+    }
+
+    pub fn get_typed<T: Any + Send + Sync>(&self) -> Option<&T> {
+        self.typed_metadata.get::<T>()
     }
 }
 

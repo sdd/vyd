@@ -1,13 +1,17 @@
 [package]
-name = "vyd_main"
+name = "vyd-main"
 edition = "2024"
 version.workspace = true
 authors.workspace = true
 description.workspace = true
-documentation.workspace = true
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+documentation = "https://docs.rs/vyd-main"
 
 [dependencies]
 vyd = { workspace = true }
+vyd_gstreamer = { package = "vyd-gstreamer", path = "../vyd_gstreamer", version = "0.1.0" }
 
 clap = { workspace = true }
 tracing = "0.1"

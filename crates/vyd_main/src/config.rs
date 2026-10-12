@@ -2,7 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "vyd_main")]
+#[command(name = "vyd-main")]
 #[command(about = "Vyd video processing pipeline")]
 #[command(version)]
 pub struct Config {

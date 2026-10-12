@@ -1,0 +1,60 @@
+default_install_hook_types:
+  - pre-commit
+  - pre-push
+  - commit-msg
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-case-conflict
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: trailing-whitespace
+        args: ["--markdown-linebreak-ext=md"]
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+        files: '^\.github/workflows/.*\.ya?ml$'
+
+  - repo: local
+    hooks:
+      - id: taplo-format-check
+        name: taplo format --check
+        entry: taplo format --check
+        language: system
+        files: '\.toml$'
+        stages: [pre-commit, pre-push]
+      - id: commitlint
+        name: commitlint
+        entry: commitlint --config .commitlintrc.yaml --edit
+        language: node
+        additional_dependencies:
+          - "@commitlint/cli"
+          - "@commitlint/config-conventional"
+        stages: [commit-msg]
+      - id: prettier-check-text
+        name: prettier --check (YAML, Markdown)
+        entry: prettier --check
+        language: node
+        additional_dependencies:
+          - prettier@3.6.2
+        files: '(\.ya?ml$|\.md$)'
+        stages: [pre-commit, pre-push]
+      - id: cargo-fmt-check
+        name: cargo fmt --all --check
+        entry: cargo fmt --all --check
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-push]

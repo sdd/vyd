@@ -1,0 +1,46 @@
+name: Prepare release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+env:
+  RUSTFLAGS: ""
+  CARGO_BUILD_WARNINGS: warn
+
+jobs:
+  release-pr:
+    name: Prepare release PR
+    if: github.repository == 'sdd/vyd'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Require release token
+        env:
+          RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: test -n "$RELEASE_PLZ_TOKEN" || { echo 'Configure RELEASE_PLZ_TOKEN to open release PRs and trigger CI' >&2; exit 1; }
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+      - name: Install GStreamer headers and software Vulkan
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base libvulkan1 mesa-vulkan-drivers
+      - name: Validate release inputs
+        run: cargo test --workspace --all-features --locked
+      - name: Prepare release PR
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}

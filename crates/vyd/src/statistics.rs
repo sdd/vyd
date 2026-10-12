@@ -1,8 +1,145 @@
+use crate::frame::PixelFormat;
 use dashmap::DashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// The stable pipeline, device, or pool that owns an operation's resources.
+/// Do not use a fresh ID for every frame: that would make statistics grow
+/// without bound. Individual lease IDs belong in pool diagnostics and traces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ResourceOwnerId(pub u64);
+
+/// A physical transfer or a requested-format conversion. Cache hits do not
+/// create an attempt. The location names where conversion bytes are processed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FrameOperationKind {
+    Upload(PixelFormat),
+    Download(PixelFormat),
+    Conversion {
+        from: PixelFormat,
+        to: PixelFormat,
+        location: ConversionLocation,
+    },
+    PlanePacking {
+        format: PixelFormat,
+        direction: PackingDirection,
+    },
+    GpuCopy(PixelFormat),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConversionLocation {
+    Cpu,
+    Gpu,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PackingDirection {
+    Pack,
+    Unpack,
+}
+
+impl FrameOperationKind {
+    fn label(self) -> String {
+        fn format_label(format: PixelFormat) -> &'static str {
+            match format {
+                PixelFormat::Luma8 => "luma8",
+                PixelFormat::Nv12 => "nv12",
+            }
+        }
+        match self {
+            Self::Upload(format) => format!("upload_{}", format_label(format)),
+            Self::Download(format) => format!("download_{}", format_label(format)),
+            Self::GpuCopy(format) => format!("gpu_copy_{}", format_label(format)),
+            Self::PlanePacking { format, direction } => format!(
+                "{}_{}",
+                match direction {
+                    PackingDirection::Pack => "pack",
+                    PackingDirection::Unpack => "unpack",
+                },
+                format_label(format)
+            ),
+            Self::Conversion { from, to, location } => format!(
+                "convert_{}_{}_to_{}",
+                match location {
+                    ConversionLocation::Cpu => "cpu",
+                    ConversionLocation::Gpu => "gpu",
+                },
+                format_label(from),
+                format_label(to)
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, PartialEq, Eq)]
+pub struct FrameOperationSnapshot {
+    pub attempted: u64,
+    pub failed: u64,
+    pub completed: u64,
+    /// Visible pixel payload processed by completed operations only.
+    pub visible_bytes: u64,
+    /// Physical staging bytes processed by completed operations only.
+    pub staging_bytes: u64,
+    /// Bytes physically copied across the transfer or texture-copy boundary.
+    pub transfer_bytes: u64,
+    pub wait_count: u64,
+    pub wait_time_us: u64,
+    pub owner_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FrameOperationBytes {
+    pub visible: u64,
+    pub staging: u64,
+    pub transferred: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FrameOperationKey {
+    kind: FrameOperationKind,
+    owner: Option<ResourceOwnerId>,
+}
+
+/// An attempted operation. Dropping it without `complete` records failure,
+/// including early validation errors, cancellation, and unwinding. A caller
+/// must complete only after bytes have actually transferred or converted.
+#[must_use = "complete the operation or let it record a failure on drop"]
+pub struct FrameOperationAttempt {
+    counters: Arc<Mutex<FrameOperationSnapshot>>,
+    completed: bool,
+}
+
+impl FrameOperationAttempt {
+    pub fn record_wait(&mut self, duration: Duration) {
+        let mut counters = self.counters.lock().unwrap_or_else(|e| e.into_inner());
+        counters.wait_count = counters.wait_count.saturating_add(1);
+        counters.wait_time_us = counters
+            .wait_time_us
+            .saturating_add(duration.as_micros().min(u64::MAX as u128) as u64);
+    }
+
+    pub fn complete(mut self, bytes: FrameOperationBytes) {
+        let mut counters = self.counters.lock().unwrap_or_else(|e| e.into_inner());
+        counters.completed = counters.completed.saturating_add(1);
+        counters.visible_bytes = counters.visible_bytes.saturating_add(bytes.visible);
+        counters.staging_bytes = counters.staging_bytes.saturating_add(bytes.staging);
+        counters.transfer_bytes = counters.transfer_bytes.saturating_add(bytes.transferred);
+        self.completed = true;
+    }
+}
+
+impl Drop for FrameOperationAttempt {
+    fn drop(&mut self) {
+        if !self.completed {
+            let mut counters = self.counters.lock().unwrap_or_else(|e| e.into_inner());
+            counters.failed = counters.failed.saturating_add(1);
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct StageTimingStats {
@@ -40,6 +177,7 @@ pub enum MemoryOperation {
     ZeroCopyReference,
     GpuDownload(usize),
     CpuAllocation(usize),
+    CpuZero(usize),
     GpuUpload(usize),
     CpuCopy(usize),
 }
@@ -52,7 +190,7 @@ struct EnhancedStageData {
     display_name: String,
     stats: StageTimingStats,
     median_time_us: f64,
-    processing_type: ProcessingType,
+    processing_type: Option<ProcessingType>,
     memory_summary: String,
 }
 
@@ -184,6 +322,8 @@ pub struct PipelineStatistics {
 
     pub stage_processing_types: Arc<DashMap<String, ProcessingType>>,
     pub memory_operations: Arc<DashMap<String, Arc<AtomicU64>>>,
+    frame_operations:
+        Arc<DashMap<String, Arc<DashMap<FrameOperationKey, Arc<Mutex<FrameOperationSnapshot>>>>>>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -193,6 +333,9 @@ pub struct PipelineStatisticsSnapshot {
     pub total_processing_time_us: u64,
     pub stages: std::collections::BTreeMap<String, StageStatisticsSnapshot>,
     pub memory_operations: std::collections::BTreeMap<String, u64>,
+    /// Omitted when empty so CPU-only exports retain their existing JSON form.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub frame_operations: BTreeMap<String, BTreeMap<String, FrameOperationSnapshot>>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -242,6 +385,26 @@ impl PipelineStatistics {
                 .iter()
                 .map(|entry| (entry.key().clone(), entry.value().load(Ordering::Relaxed)))
                 .collect(),
+            frame_operations: self
+                .frame_operations
+                .iter()
+                .map(|stage| {
+                    let operations = stage
+                        .value()
+                        .iter()
+                        .map(|entry| {
+                            let key = entry.key();
+                            let label = match key.owner {
+                                Some(owner) => format!("{}@owner_{}", key.kind.label(), owner.0),
+                                None => key.kind.label(),
+                            };
+                            let counters = *entry.value().lock().unwrap_or_else(|e| e.into_inner());
+                            (label, counters)
+                        })
+                        .collect();
+                    (stage.key().clone(), operations)
+                })
+                .collect(),
         }
     }
 
@@ -254,6 +417,38 @@ impl PipelineStatistics {
             is_running: Arc::new(AtomicBool::new(true)),
             stage_processing_types: Arc::new(DashMap::new()),
             memory_operations: Arc::new(DashMap::new()),
+            frame_operations: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Begin one physical operation. Keep the returned ticket alive until it
+    /// succeeds; dropping it records a failed attempt without completed bytes.
+    pub fn begin_frame_operation(
+        &self,
+        stage: &str,
+        kind: FrameOperationKind,
+        owner: Option<ResourceOwnerId>,
+    ) -> FrameOperationAttempt {
+        let stage_operations = self
+            .frame_operations
+            .entry(stage.to_string())
+            .or_insert_with(|| Arc::new(DashMap::new()))
+            .clone();
+        let counters = stage_operations
+            .entry(FrameOperationKey { kind, owner })
+            .or_insert_with(|| {
+                Arc::new(Mutex::new(FrameOperationSnapshot {
+                    owner_id: owner.map(|owner| owner.0),
+                    ..FrameOperationSnapshot::default()
+                }))
+            })
+            .clone();
+        let mut snapshot = counters.lock().unwrap_or_else(|e| e.into_inner());
+        snapshot.attempted = snapshot.attempted.saturating_add(1);
+        drop(snapshot);
+        FrameOperationAttempt {
+            counters,
+            completed: false,
         }
     }
 
@@ -285,6 +480,14 @@ impl PipelineStatistics {
                     .or_insert_with(|| Arc::new(AtomicU64::new(0)))
                     .fetch_add(bytes as u64, Ordering::Relaxed);
                 format!("{}_cpu_alloc_count", stage_name)
+            }
+            MemoryOperation::CpuZero(bytes) => {
+                let key = format!("{}_cpu_zero_bytes", stage_name);
+                self.memory_operations
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+                    .fetch_add(bytes as u64, Ordering::Relaxed);
+                format!("{}_cpu_zero_count", stage_name)
             }
             MemoryOperation::GpuUpload(bytes) => {
                 let key = format!("{}_gpu_upload_bytes", stage_name);
@@ -373,6 +576,21 @@ impl PipelineStatistics {
             }
         }
 
+        if let Some(zero_count) = self
+            .memory_operations
+            .get(&format!("{}_cpu_zero_count", stage_name))
+        {
+            let count = zero_count.load(Ordering::Relaxed);
+            if count > 0 {
+                let bytes = self
+                    .memory_operations
+                    .get(&format!("{}_cpu_zero_bytes", stage_name))
+                    .map(|b| b.load(Ordering::Relaxed))
+                    .unwrap_or(0);
+                operations.push(format!("{}×Clear({})", count, Self::format_bytes(bytes)));
+            }
+        }
+
         // Check for GPU downloads
         if let Some(dl_count) = self
             .memory_operations
@@ -421,6 +639,49 @@ impl PipelineStatistics {
             }
         }
 
+        // Managed frame transfers use frame-operation tickets rather than the
+        // older memory-operation counters. Show their logical payload here so
+        // GPU boundary and processor rows do not appear transfer-free.
+        if let Some(frame_operations) = self.frame_operations.get(stage_name) {
+            let mut uploaded = (0_u64, 0_u64);
+            let mut downloaded = (0_u64, 0_u64);
+            for operation in frame_operations.iter() {
+                let counters = *operation
+                    .value()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let totals = match operation.key().kind {
+                    FrameOperationKind::Upload(_) => &mut uploaded,
+                    FrameOperationKind::Download(_) => &mut downloaded,
+                    _ => continue,
+                };
+                totals.0 = totals.0.saturating_add(counters.completed);
+                totals.1 = totals.1.saturating_add(counters.visible_bytes);
+            }
+            let legacy_upload = self
+                .memory_operations
+                .get(&format!("{}_gpu_upload_count", stage_name))
+                .is_some_and(|count| count.load(Ordering::Relaxed) > 0);
+            let legacy_download = self
+                .memory_operations
+                .get(&format!("{}_gpu_download_count", stage_name))
+                .is_some_and(|count| count.load(Ordering::Relaxed) > 0);
+            if uploaded.0 > 0 && !legacy_upload {
+                operations.push(format!(
+                    "{}×GPU↑({})",
+                    uploaded.0,
+                    Self::format_bytes(uploaded.1)
+                ));
+            }
+            if downloaded.0 > 0 && !legacy_download {
+                operations.push(format!(
+                    "{}×GPU↓({})",
+                    downloaded.0,
+                    Self::format_bytes(downloaded.1)
+                ));
+            }
+        }
+
         if operations.is_empty() {
             "-".to_string()
         } else {
@@ -429,8 +690,17 @@ impl PipelineStatistics {
     }
 
     /// Enhanced stage data structure for table rendering
-    fn get_enhanced_stage_data(&self) -> (Vec<EnhancedStageData>, Vec<EnhancedStageData>) {
+    fn get_enhanced_stage_data(
+        &self,
+    ) -> (
+        Vec<EnhancedStageData>,
+        Vec<EnhancedStageData>,
+        Vec<EnhancedStageData>,
+        Vec<EnhancedStageData>,
+    ) {
         let mut external_stages = Vec::new();
+        let mut boundary_timings = Vec::new();
+        let mut background_timings = Vec::new();
         let mut pipeline_stages = Vec::new();
 
         for entry in self.stage_timings.iter() {
@@ -438,23 +708,24 @@ impl PipelineStatistics {
             let stats = entry.value().clone();
             let median_time_us = stats.get_median().unwrap_or(0.0);
 
-            // Get processing type
+            // External elements are not registered as Vyd CPU/GPU stages.
+            // Leave their execution type unknown rather than implying CPU.
             let processing_type = self
                 .stage_processing_types
                 .get(stage_name)
-                .map(|pt| *pt.value())
-                .unwrap_or(ProcessingType::Cpu);
+                .map(|pt| *pt.value());
 
             // Get memory operations summary
             let memory_summary = self.get_memory_summary(stage_name);
 
             let enhanced_data = EnhancedStageData {
                 name: stage_name.clone(),
-                display_name: if stage_name.starts_with("external/") {
-                    stage_name
-                        .strip_prefix("external/")
-                        .unwrap_or(stage_name)
-                        .to_string()
+                display_name: if let Some(label) = stage_name
+                    .strip_prefix("external/")
+                    .or_else(|| stage_name.strip_prefix("boundary/"))
+                    .or_else(|| stage_name.strip_prefix("background/"))
+                {
+                    label.to_string()
                 } else {
                     Self::extract_stage_name(stage_name).to_string()
                 },
@@ -466,6 +737,10 @@ impl PipelineStatistics {
 
             if stage_name.starts_with("external/") {
                 external_stages.push(enhanced_data);
+            } else if stage_name.starts_with("boundary/") {
+                boundary_timings.push(enhanced_data);
+            } else if stage_name.starts_with("background/") {
+                background_timings.push(enhanced_data);
             } else {
                 pipeline_stages.push(enhanced_data);
             }
@@ -473,87 +748,72 @@ impl PipelineStatistics {
 
         // Sort by median time (descending)
         external_stages.sort_by(|a, b| b.median_time_us.partial_cmp(&a.median_time_us).unwrap());
+        boundary_timings.sort_by(|a, b| b.median_time_us.partial_cmp(&a.median_time_us).unwrap());
+        background_timings.sort_by(|a, b| b.median_time_us.partial_cmp(&a.median_time_us).unwrap());
         pipeline_stages.sort_by(|a, b| b.median_time_us.partial_cmp(&a.median_time_us).unwrap());
 
-        (external_stages, pipeline_stages)
+        (
+            external_stages,
+            boundary_timings,
+            background_timings,
+            pipeline_stages,
+        )
     }
 
-    fn print_stage_table(
-        &self,
-        title: &str,
-        stages: &[EnhancedStageData],
-        total_stage_time_us: u64,
-    ) {
+    fn print_stage_table(&self, title: &str, stages: &[EnhancedStageData]) {
         if stages.is_empty() {
             return;
         }
 
         println!("\n--- {} ---", title);
         println!(
-            "{:<25} {:<4} {:<6} {:<8} {:<8} {:<8} {:<8} {:<10} {:<8} {:<25}",
-            "Stage",
-            "Type",
-            "Calls",
-            "Median",
-            "95%Mean",
-            "Min",
-            "Max",
-            "Total",
-            "%Pipe",
-            "Memory Operations"
+            "{:<25} {:<4} {:<6} {:<8} {:<8} {:<8} {:<8} {:<8} {:<50}",
+            "Stage", "Type", "Calls", "p50", "p95", "Mean", "Min", "Max", "Memory Operations"
         );
         println!(
-            "{:<25} {:<4} {:<6} {:<8} {:<8} {:<8} {:<8} {:<10} {:<8} {:<25}",
-            "", "", "", "(ms)", "(ms)", "(ms)", "(ms)", "(ms)", "", ""
+            "{:<25} {:<4} {:<6} {:<8} {:<8} {:<8} {:<8} {:<8} {:<50}",
+            "", "", "", "(ms)", "(ms)", "(ms)", "(ms)", "(ms)", ""
         );
-        println!("{}", "─".repeat(145));
+        println!("{}", "─".repeat(140));
 
         for stage_data in stages {
             let call_count = stage_data.stats.call_count.load(Ordering::Relaxed);
             let min_time_us = stage_data.stats.min_time_us.load(Ordering::Relaxed);
             let max_time_us = stage_data.stats.max_time_us.load(Ordering::Relaxed);
-            let total_time_us = stage_data.stats.total_time_us.load(Ordering::Relaxed);
-
             let min_time_ms = if min_time_us == u64::MAX {
                 0.0
             } else {
                 min_time_us as f64 / 1000.0
             };
             let max_time_ms = max_time_us as f64 / 1000.0;
-            let total_time_ms = total_time_us as f64 / 1000.0;
-
-            // Calculate robust statistics
-            let median_ms = stage_data.stats.get_median().unwrap_or(0.0) / 1000.0;
-            let trimmed_mean_ms = stage_data
-                .stats
-                .get_trimmed_mean(0.025, 0.975)
-                .unwrap_or(0.0)
-                / 1000.0;
-
-            let percentage = if total_stage_time_us > 0 {
-                (total_time_us as f64 / total_stage_time_us as f64) * 100.0
-            } else {
-                0.0
-            };
+            let p50_ms = stage_data.stats.get_percentile(0.5).unwrap_or(0.0) / 1000.0;
+            let p95_ms = stage_data.stats.get_percentile(0.95).unwrap_or(0.0) / 1000.0;
+            let mean_ms = stage_data.stats.get_avg_time_us() / 1000.0;
 
             // Truncate memory summary if too long
-            let memory_display = if stage_data.memory_summary.len() > 25 {
-                format!("{}...", &stage_data.memory_summary[..22])
+            let memory_display = if stage_data.memory_summary.len() > 50 {
+                format!(
+                    "{}...",
+                    stage_data
+                        .memory_summary
+                        .chars()
+                        .take(47)
+                        .collect::<String>()
+                )
             } else {
                 stage_data.memory_summary.clone()
             };
 
             println!(
-                "{:<25} {:<4} {:<6} {:<8.2} {:<8.2} {:<8.2} {:<8.2} {:<10.1} {:<7.1}% {:<25}",
+                "{:<25} {:<4} {:<6} {:<8.2} {:<8.2} {:<8.2} {:<8.2} {:<8.2} {:<50}",
                 stage_data.display_name,
-                stage_data.processing_type.as_str(),
+                stage_data.processing_type.map_or("?", |kind| kind.as_str()),
                 call_count,
-                median_ms,
-                trimmed_mean_ms,
+                p50_ms,
+                p95_ms,
+                mean_ms,
                 min_time_ms,
                 max_time_ms,
-                total_time_ms,
-                percentage,
                 memory_display
             );
         }
@@ -565,7 +825,10 @@ impl PipelineStatistics {
         let total_processing_us = self.total_processing_time_us.load(Ordering::Relaxed);
 
         println!("\n=== Final Pipeline Statistics ===");
-        println!("Total runtime: {:.2}s", total_duration.as_secs_f64());
+        println!(
+            "Wall runtime (including startup/shutdown): {:.2}s",
+            total_duration.as_secs_f64()
+        );
         println!("Frames processed: {}", frames);
 
         if frames > 0 {
@@ -574,60 +837,44 @@ impl PipelineStatistics {
 
             println!("Average FPS: {:.2}", avg_fps);
             println!(
-                "Average frame processing time: {:.2}ms",
+                "Mean Vyd processing span per frame (after source): {:.2}ms",
                 avg_frame_time_us as f64 / 1000.0
-            );
-
-            // Calculate processing overhead vs. total runtime
-            let processing_ratio =
-                (total_processing_us as f64 / 1_000_000.0) / total_duration.as_secs_f64();
-            println!(
-                "Processing time ratio: {:.1}% of total runtime",
-                processing_ratio * 100.0
             );
         }
 
         // Print detailed stage-specific timings with enhanced information
         if !self.stage_timings.is_empty() {
-            let (external_stages, pipeline_stages) = self.get_enhanced_stage_data();
+            let (external_stages, boundary_timings, background_timings, pipeline_stages) =
+                self.get_enhanced_stage_data();
 
-            let total_stage_time_us: u64 = self
-                .stage_timings
-                .iter()
-                .map(|entry| entry.value().total_time_us.load(Ordering::Relaxed))
-                .sum();
-
-            self.print_stage_table(
-                "External Stage Timings",
-                &external_stages,
-                total_stage_time_us,
+            println!(
+                "Stage times are per-call elapsed latencies; calls can overlap across frames. Type is declared by Vyd stages; ? means unclassified."
             );
-            self.print_stage_table("Pipeline Stages", &pipeline_stages, total_stage_time_us);
+            if !boundary_timings.is_empty() {
+                println!(
+                    "Boundary times include automatic GPU upload and readback outside processor callbacks."
+                );
+            }
+            if !background_timings.is_empty() {
+                println!(
+                    "Background work runs outside frame callbacks and is not part of per-frame stage latency."
+                );
+            }
+            self.print_stage_table("External Stage Timings", &external_stages);
+            self.print_stage_table("Pipeline Boundary Timings", &boundary_timings);
+            self.print_stage_table("Background Work", &background_timings);
+            self.print_stage_table("Pipeline Stages", &pipeline_stages);
 
             // Print memory operation legend
             println!("\nMemory Operation Legend:");
             println!("  Zero    = Zero-copy reference");
             println!("  CPU(s)  = CPU allocation (size)");
+            println!("  Clear(s) = recycled CPU buffer clearing (size)");
             println!("  GPU↓(s) = GPU download (size)");
             println!("  GPU↑(s) = GPU upload (size)");
             println!("  Copy(s) = CPU copy (size)");
 
-            println!("{}", "─".repeat(145));
-            println!(
-                "Total stage processing time: {:.1}ms",
-                total_stage_time_us as f64 / 1000.0
-            );
-
-            if frames > 0 {
-                let total_wall_clock_us = (total_duration.as_secs_f64() * 1_000_000.0) as u64;
-                let pipeline_overhead_us = total_wall_clock_us.saturating_sub(total_stage_time_us);
-                let avg_overhead_per_frame = pipeline_overhead_us as f64 / frames as f64 / 1000.0;
-
-                println!(
-                    "Average pipeline overhead per frame: {:.2}ms",
-                    avg_overhead_per_frame
-                );
-            }
+            println!("{}", "─".repeat(140));
         }
         println!("=================================\n");
     }
@@ -654,17 +901,100 @@ impl PipelineStatistics {
     }
 }
 
-// Global statistics context
+// Legacy fallback for callers outside managed run/invocation scopes. Pipeline
+// execution never installs a global run: concurrent runs enter explicit scopes.
 static GLOBAL_STATS: OnceLock<Arc<Mutex<Option<Arc<PipelineStatistics>>>>> = OnceLock::new();
 
-// Properly declare thread-local storage
 std::thread_local! {
     static CURRENT_STAGE: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    static CURRENT_CONTEXT: std::cell::RefCell<Option<StatsContext>> = const { std::cell::RefCell::new(None) };
 }
 
-pub struct StatsContext;
+/// Owned run/stage attribution that can be captured and moved to a worker.
+/// Enter it around synchronous work on that worker. It does not automatically
+/// propagate through arbitrary thread spawns or async tasks.
+#[derive(Clone)]
+pub struct StatsContext {
+    stats: Arc<PipelineStatistics>,
+    stage: Option<Arc<str>>,
+}
+
+/// Restores the previous context on scope exit, including unwinding.
+/// Guards must be nested and dropped in reverse order, on the entering thread.
+/// Do not hold one across an async suspension; enter for each synchronous poll
+/// or work item instead. The owned `StatsContext` is the transferable token.
+#[must_use = "keep the guard alive for the duration of the attributed work"]
+pub struct StatsScope {
+    previous: Option<StatsContext>,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for StatsScope {
+    fn drop(&mut self) {
+        CURRENT_CONTEXT.with(|current| current.replace(self.previous.take()));
+    }
+}
 
 impl StatsContext {
+    pub fn new(stats: Arc<PipelineStatistics>) -> Self {
+        Self { stats, stage: None }
+    }
+
+    pub fn for_stage(&self, stage: impl Into<Arc<str>>) -> Self {
+        Self {
+            stats: self.stats.clone(),
+            stage: Some(stage.into()),
+        }
+    }
+
+    /// Keep a caller's explicit attribution. A pipeline-wide service can
+    /// instead borrow the current synchronous stage scope for this operation.
+    #[cfg(feature = "gpu-wgpu")]
+    pub(crate) fn with_current_stage(&self) -> Self {
+        if self.stage.is_some() {
+            self.clone()
+        } else {
+            Self::capture().unwrap_or_else(|| self.clone())
+        }
+    }
+
+    /// Explicit attribution token for work that may move between threads or
+    /// async polls. An unqualified token records under the pipeline stage.
+    pub fn begin_frame_operation(
+        &self,
+        kind: FrameOperationKind,
+        owner: Option<ResourceOwnerId>,
+    ) -> FrameOperationAttempt {
+        self.stats
+            .begin_frame_operation(self.stage.as_deref().unwrap_or("pipeline"), kind, owner)
+    }
+
+    /// Convenience for synchronous stage code. Capture an explicit context
+    /// before moving work to another worker or across an async suspension.
+    pub fn begin_current_frame_operation(
+        kind: FrameOperationKind,
+        owner: Option<ResourceOwnerId>,
+    ) -> Option<FrameOperationAttempt> {
+        if let Some(context) = Self::capture() {
+            return Some(context.begin_frame_operation(kind, owner));
+        }
+        let stage = CURRENT_STAGE.with(|name| name.borrow().clone())?;
+        Self::with_stats(|stats| stats.begin_frame_operation(&stage, kind, owner))
+    }
+
+    pub fn enter(&self) -> StatsScope {
+        StatsScope {
+            previous: CURRENT_CONTEXT.with(|current| current.replace(Some(self.clone()))),
+            _thread_bound: std::marker::PhantomData,
+        }
+    }
+
+    /// Capture explicit attribution for a child worker. No scope means no token.
+    pub fn capture() -> Option<Self> {
+        CURRENT_CONTEXT.with(|current| current.borrow().clone())
+    }
+
+    /// Legacy process-global fallback. Prefer `new(...).enter()` for run isolation.
     pub fn set_global_stats(stats: Arc<PipelineStatistics>) {
         let global = GLOBAL_STATS.get_or_init(|| Arc::new(Mutex::new(None)));
         if let Ok(mut guard) = global.lock() {
@@ -683,18 +1013,18 @@ impl StatsContext {
     where
         F: FnOnce(&PipelineStatistics) -> R,
     {
-        let global = GLOBAL_STATS.get_or_init(|| Arc::new(Mutex::new(None)));
-        if let Ok(guard) = global.lock() {
-            if let Some(ref stats) = *guard {
-                Some(f(stats))
-            } else {
-                None
-            }
-        } else {
-            None
+        if let Some(context) = Self::capture() {
+            return Some(f(&context.stats));
         }
+        let global = GLOBAL_STATS.get_or_init(|| Arc::new(Mutex::new(None)));
+        let stats = global.lock().ok()?.clone()?;
+        // Release the registry lock before invoking caller code (which may
+        // enter another scope or call with_stats recursively).
+        Some(f(&stats))
     }
 
+    /// Set stage attribution for the legacy fallback only. Explicit scopes take
+    /// precedence; use `for_stage(...).enter()` inside a managed run.
     pub fn set_current_stage(stage_name: String) {
         CURRENT_STAGE.with(|name| {
             *name.borrow_mut() = Some(stage_name);
@@ -708,12 +1038,15 @@ impl StatsContext {
     }
 
     pub fn record_memory_operation(operation: MemoryOperation) {
-        CURRENT_STAGE.with(|name| {
-            if let Some(ref stage_name) = *name.borrow() {
-                Self::with_stats(|stats| {
-                    stats.record_memory_operation(stage_name, operation);
-                });
+        if let Some(context) = Self::capture() {
+            if let Some(stage) = context.stage {
+                context.stats.record_memory_operation(&stage, operation);
             }
-        });
+            return;
+        }
+        let stage = CURRENT_STAGE.with(|name| name.borrow().clone());
+        if let Some(stage) = stage {
+            Self::with_stats(|stats| stats.record_memory_operation(&stage, operation));
+        }
     }
 }

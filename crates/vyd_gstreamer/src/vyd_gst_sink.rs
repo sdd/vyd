@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use gst::glib;
 use gst::prelude::BufferPoolExtManual;
@@ -9,6 +10,7 @@ use once_cell::sync::Lazy;
 
 use crate::frame_buffer_pool::SharedFrameBufferPool;
 use crate::gst_buffer_timing_meta::TimingMeta;
+use crate::managed_pool::ManagedFramePool;
 use crate::vyd_frame_queue::VydFrameQueue;
 use crate::vyd_gst_buffer_pool::VydGstBufferPool;
 
@@ -36,29 +38,43 @@ impl VydGstSink {
         let imp = self.imp();
         *imp.frame_buffer_pool.lock().unwrap() = Some(pool);
     }
+
+    pub fn set_managed_pool(&self, pool: Arc<ManagedFramePool>) {
+        *self.imp().managed_pool.lock().unwrap() = Some(pool);
+    }
+
+    pub fn set_statistics(&self, stats: Arc<vyd::statistics::PipelineStatistics>) {
+        if let Some(pool) = self.imp().managed_pool.lock().unwrap().as_ref() {
+            pool.set_statistics(stats.clone());
+        }
+        *self.imp().statistics.lock().unwrap() = Some(stats);
+    }
 }
 
 mod imp {
     use super::*;
     use gst::glib::Cast;
-    use vyd::Frame;
+    use vyd::frame::layout::{CpuLayout, CpuPlaneLayout, FrameSpec};
+    use vyd::frame::PixelFormat;
+    use vyd::statistics::{MemoryOperation, PipelineStatistics};
+    use vyd::{Frame, FrameTiming};
 
     #[derive(Default)]
     pub struct VydGstSink {
         pub(crate) output_frame_queue: Mutex<Option<Arc<VydFrameQueue>>>,
         pub(crate) frame_buffer_pool: Mutex<Option<SharedFrameBufferPool>>,
+        pub(crate) managed_pool: Mutex<Option<Arc<ManagedFramePool>>>,
         pub(crate) gst_buffer_pool: Mutex<Option<VydGstBufferPool>>,
+        pub(crate) statistics: Mutex<Option<Arc<PipelineStatistics>>>,
     }
 
     impl VydGstSink {
-        /// Extract video dimensions from caps
-        fn get_video_dimensions_from_caps(&self) -> Option<(u32, u32)> {
+        fn get_video_info_from_caps(&self) -> Option<gst_video::VideoInfo> {
             let binding = self.obj();
             let element: &super::VydGstSink = binding.as_ref();
             let sink_pad = element.static_pad("sink")?;
             let caps = sink_pad.current_caps()?;
-            let video_info = gst_video::VideoInfo::from_caps(&caps).ok()?;
-            Some((video_info.width(), video_info.height()))
+            gst_video::VideoInfo::from_caps(&caps).ok()
         }
 
         fn render(&self, buffer: &gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
@@ -66,12 +82,26 @@ mod imp {
             timing_data.push((TimingMeta::now(), "gst_vydsink_entry".to_string()));
 
             // Get dimensions from caps instead of hardcoding
-            let (width, height) = self.get_video_dimensions_from_caps().unwrap_or_else(|| {
-                tracing::warn!(
-                    "Could not determine video dimensions from caps, using fallback 1920x1080"
-                );
-                (1920, 1080)
-            });
+            let info = self.get_video_info_from_caps();
+            let Some(info) = info else {
+                tracing::error!("packed Luma8 caps are required before frame delivery");
+                return Err(gst::FlowError::NotNegotiated);
+            };
+            let (width, height) = (info.width(), info.height());
+            let packed = if let Some(meta) = buffer.meta::<gst_video::VideoMeta>() {
+                meta.width() == width
+                    && meta.height() == height
+                    && meta.stride()[0] == width as i32
+                    && meta.offset()[0] == 0
+            } else {
+                info.stride()[0] == width as i32 && info.offset()[0] == 0
+            };
+            if !packed {
+                // TODO(Frame v2): require an explicit GST/Vyd layout converter
+                // when its contract can be represented and verified end to end.
+                tracing::error!(width, height, "padded Luma8 storage is not yet implemented");
+                return Err(gst::FlowError::NotNegotiated);
+            }
 
             // non-ZC fallback if memory count is not 1
             let memory_count = buffer.n_memory();
@@ -85,8 +115,9 @@ mod imp {
                 );
             }
 
-            // non-ZC fallback if we don't have a frame buffer pool
-            let Some(frame_buffer_pool) = self.frame_buffer_pool.lock().unwrap().clone() else {
+            let managed = self.managed_pool.lock().unwrap().clone();
+            let legacy = self.frame_buffer_pool.lock().unwrap().clone();
+            if managed.is_none() && legacy.is_none() {
                 return self.render_with_copy(
                     buffer,
                     timing_data,
@@ -94,7 +125,7 @@ mod imp {
                     width,
                     height,
                 );
-            };
+            }
 
             let memory_ptr = {
                 let Ok(map) = buffer.peek_memory(0).map_readable() else {
@@ -106,12 +137,16 @@ mod imp {
 
             // Where the ZC magic happens - acquire a Frame from our pool from
             // the slot that corresponds to the memory pointer
-            let Ok(frame) = ({
-                frame_buffer_pool
+            let frame = if let Some(managed) = managed {
+                managed.acquire_frame_from_ptr(buffer, memory_ptr, width, height)
+            } else {
+                legacy
+                    .unwrap()
                     .lock()
                     .unwrap()
                     .acquire_frame_from_ptr(memory_ptr, width, height)
-            }) else {
+            };
+            let Ok(frame) = frame else {
                 // non-ZC fallback if we couldn't acquire a Frame from our pool using the ptr
                 return self.render_with_copy(
                     buffer,
@@ -122,12 +157,17 @@ mod imp {
                 );
             };
 
+            if let Some(stats) = self.statistics.lock().unwrap().as_ref() {
+                stats
+                    .record_memory_operation("gst-source/sink", MemoryOperation::ZeroCopyReference);
+            }
+
             tracing::trace!(
                 memory_ptr = ?memory_ptr,
                 "Zero-copy: acquired Frame from memory pointer"
             );
 
-            self.write_frame_to_queue(frame, timing_data)
+            self.write_frame_to_queue(frame, timing_data, buffer)
         }
 
         /// Fallback copy-based rendering for buffers not from our pool
@@ -144,12 +184,54 @@ mod imp {
             let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
             let data = map.as_slice();
 
-            let Ok(frame) = Frame::from_raw(width, height, data.to_vec()) else {
+            // TODO(Frame v2): keep this checked row path for an explicit
+            // padded-to-packed converter. The render boundary currently
+            // rejects padded input before reaching this fallback.
+            let pixels = if let Some(info) = self.get_video_info_from_caps() {
+                let (offset, stride) = if let Some(meta) = buffer.meta::<gst_video::VideoMeta>() {
+                    if meta.width() != width || meta.height() != height {
+                        return Err(gst::FlowError::Error);
+                    }
+                    (meta.offset()[0], meta.stride()[0])
+                } else {
+                    (info.offset()[0], info.stride()[0])
+                };
+                let stride = usize::try_from(stride).map_err(|_| gst::FlowError::Error)?;
+                let spec = FrameSpec::new(width, height, PixelFormat::Luma8)
+                    .map_err(|_| gst::FlowError::Error)?;
+                let layout = CpuLayout::new(
+                    spec,
+                    &[CpuPlaneLayout::new(0, offset, stride)],
+                    &[data.len()],
+                )
+                .map_err(|_| gst::FlowError::Error)?;
+                let mut packed = Vec::with_capacity(width as usize * height as usize);
+                for row in 0..height as usize {
+                    packed.extend_from_slice(
+                        layout
+                            .row(&[data], 0, row)
+                            .map_err(|_| gst::FlowError::Error)?,
+                    );
+                }
+                packed
+            } else {
+                data.to_vec()
+            };
+            let Ok(frame) = Frame::from_raw(width, height, pixels) else {
                 tracing::error!("Failed to create Frame from buffer");
                 return Err(gst::FlowError::Error);
             };
 
-            self.write_frame_to_queue(frame, timing_data)
+            if let Some(stats) = self.statistics.lock().unwrap().as_ref() {
+                let len = frame.pixel_count() as usize;
+                stats.record_memory_operation(
+                    "gst-source/sink",
+                    MemoryOperation::CpuAllocation(len),
+                );
+                stats.record_memory_operation("gst-source/sink", MemoryOperation::CpuCopy(len));
+            }
+
+            self.write_frame_to_queue(frame, timing_data, buffer)
         }
 
         /// Extract timing metadata and write frame to output queue
@@ -157,6 +239,7 @@ mod imp {
             &self,
             frame: Frame,
             mut timing_data: Vec<(u64, String)>,
+            buffer: &gst::Buffer,
         ) -> Result<gst::FlowSuccess, gst::FlowError> {
             timing_data.push((TimingMeta::now(), "gst_vydsink_exit".to_string()));
 
@@ -165,7 +248,18 @@ mod imp {
                 return Err(gst::FlowError::Error);
             };
 
-            match queue.write_frame_with_timing(frame, Some(timing_data)) {
+            let media_timing = FrameTiming {
+                presentation_timestamp: buffer
+                    .pts()
+                    .map(|time| Duration::from_nanos(time.nseconds())),
+                decode_timestamp: buffer
+                    .dts()
+                    .map(|time| Duration::from_nanos(time.nseconds())),
+                duration: buffer
+                    .duration()
+                    .map(|time| Duration::from_nanos(time.nseconds())),
+            };
+            match queue.write_frame_with_metadata(frame, Some(timing_data), media_timing) {
                 Ok(()) => Ok(gst::FlowSuccess::Ok),
                 Err("Buffer full") => {
                     tracing::warn!("Frame rejected due to full buffer");
@@ -224,6 +318,24 @@ mod imp {
     }
 
     impl BaseSinkImpl for VydGstSink {
+        fn set_caps(&self, caps: &gst::Caps) -> Result<(), gst::LoggableError> {
+            let info = gst_video::VideoInfo::from_caps(caps).map_err(|_| {
+                gst::loggable_error!(gst::CAT_RUST, "unsupported Vyd source video caps")
+            })?;
+            if info.format() != gst_video::VideoFormat::Gray8
+                || info.stride()[0] != info.width() as i32
+                || info.offset()[0] != 0
+            {
+                // TODO(Frame v2): negotiate an explicit stride conversion
+                // stage when packed and padded frame transport are implemented.
+                return Err(gst::loggable_error!(
+                    gst::CAT_RUST,
+                    "packed/padded CPU layout negotiation is not yet implemented; insert an explicit converter"
+                ));
+            }
+            self.parent_set_caps(caps)
+        }
+
         fn render(&self, buffer: &gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
             self.render(buffer)
         }
@@ -235,12 +347,14 @@ mod imp {
             tracing::debug!("propose_allocation called");
 
             // Get our frame buffer pool
-            let Some(frame_pool) = self.frame_buffer_pool.lock().unwrap().clone() else {
+            let managed = self.managed_pool.lock().unwrap().clone();
+            let legacy = self.frame_buffer_pool.lock().unwrap().clone();
+            if managed.is_none() && legacy.is_none() {
                 tracing::warn!(
                     "No frame buffer pool configured for allocation proposal. ZC-mode unavailable"
                 );
                 return Ok(()); // Let parent handle it - will fall back to copy mode
-            };
+            }
 
             // Create or reuse our GStreamer buffer pool
             let gst_pool = {
@@ -256,7 +370,12 @@ mod imp {
             //       the VydGstBufferPool?
 
             // Configure the pool with our frame buffer pool
-            gst_pool.set_frame_buffer_pool(frame_pool);
+            let managed_limit = managed.as_ref().map(|pool| pool.max_buffers());
+            if let Some(managed) = managed {
+                gst_pool.set_managed_pool(managed);
+            } else {
+                gst_pool.set_frame_buffer_pool(legacy.unwrap());
+            }
 
             // Get video info from the allocation query to configure pool
             let (Some(caps_ref), _) = query.get() else {
@@ -273,9 +392,17 @@ mod imp {
                 gst::loggable_error!(gst::CAT_RUST, "Failed to parse video info from caps")
             })?;
 
-            let size = video_info.size() as u32;
-            let min_buffers = 4u32; // Reasonable minimum for video pipeline
-            let max_buffers = 0u32; // 0 means unlimited
+            let size = u32::try_from(video_info.size()).map_err(|_| {
+                gst::loggable_error!(gst::CAT_RUST, "Negotiated video buffer exceeds GST size")
+            })?;
+            let (min_buffers, max_buffers) = if let Some(limit) = managed_limit {
+                let max = u32::try_from(limit).map_err(|_| {
+                    gst::loggable_error!(gst::CAT_RUST, "Vyd pool count exceeds GST limit")
+                })?;
+                (max.min(4), max)
+            } else {
+                (4, 0) // Legacy proposal retains its historical GST limits.
+            };
 
             // Configure the buffer pool
             let mut config = gst_pool.config();
@@ -298,5 +425,24 @@ mod imp {
 
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gst_base::subclass::prelude::BaseSinkImpl;
+
+    #[test]
+    fn padded_caps_are_rejected_at_negotiation() {
+        gst::init().unwrap();
+        let sink = VydGstSink::new();
+        let info = gst_video::VideoInfo::builder(gst_video::VideoFormat::Gray8, 5, 2)
+            .build()
+            .unwrap();
+        assert_ne!(info.stride()[0], 5);
+        let caps = info.to_caps().unwrap();
+        let error = sink.imp().set_caps(&caps).unwrap_err();
+        assert!(error.to_string().contains("not yet implemented"));
     }
 }

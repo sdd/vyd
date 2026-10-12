@@ -2,6 +2,7 @@ use gst::glib;
 use gst_base::subclass::prelude::*;
 use std::sync::{Arc, Mutex, Weak};
 
+use crate::managed_pool::ManagedFramePool;
 use crate::SharedFrameBufferPool;
 
 glib::wrapper! {
@@ -20,6 +21,10 @@ impl VydGstBufferPool {
         let imp = self.imp();
         *imp.pool.lock().unwrap() = Some(pool);
     }
+
+    pub fn set_managed_pool(&self, pool: Arc<ManagedFramePool>) {
+        *self.imp().managed_pool.lock().unwrap() = Some(pool);
+    }
 }
 
 impl Default for VydGstBufferPool {
@@ -36,6 +41,7 @@ mod imp {
     pub struct VydGstBufferPool {
         /// Reference to the frame buffer pool that manages our memory
         pub(crate) pool: Mutex<Option<SharedFrameBufferPool>>,
+        pub(crate) managed_pool: Mutex<Option<Arc<ManagedFramePool>>>,
     }
 
     #[glib::object_subclass]
@@ -66,6 +72,10 @@ mod imp {
                 caps = ?caps,
                 "Buffer pool config change requested"
             );
+
+            if let Some(managed) = self.managed_pool.lock().unwrap().as_ref() {
+                return managed.configure(size as usize).is_ok();
+            }
 
             // If we have a frame buffer pool, check if we need to recreate it for the new size
             if let Some(existing_pool) = self.pool.lock().unwrap().as_ref() {
@@ -102,6 +112,12 @@ mod imp {
             &self,
             _params: Option<&BufferPoolAcquireParams>,
         ) -> Result<gst::Buffer, gst::FlowError> {
+            if let Some(managed) = self.managed_pool.lock().unwrap().as_ref() {
+                return managed.acquire_buffer().map_err(|error| {
+                    tracing::error!(%error, "managed GST buffer acquisition failed");
+                    gst::FlowError::Error
+                });
+            }
             let pool_opt = { self.pool.lock().unwrap().clone() };
             let Some(pool) = pool_opt else {
                 tracing::error!("Acquire attempt without configured pool");

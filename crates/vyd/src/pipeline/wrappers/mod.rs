@@ -1,5 +1,5 @@
 use crate::pipeline::PipelineContext;
-use crate::statistics::{PipelineStatistics, ProcessingType, StatsContext};
+use crate::statistics::{PipelineStatistics, ProcessingType, StatsContext, StatsScope};
 use crate::traits::{FrameProcessor, FrameSink, FrameSource};
 use crate::{FrameContext, FrameProcessorResult, VydError};
 use std::sync::Arc;
@@ -23,8 +23,18 @@ pub type FrameSinkWrapper = Stage<dyn FrameSink>;
 
 impl Stage<dyn FrameSource> {
     pub fn next_frame(&mut self, ctx: &mut PipelineContext) -> Option<FrameContext> {
-        let _scope = StageScope::new(self.stage_type);
+        let _scope = stage_scope(ctx, self.stage_type);
         self.inner.next_frame(ctx)
+    }
+
+    pub fn try_next_frame(
+        &mut self,
+        ctx: &mut PipelineContext,
+    ) -> Result<Option<FrameContext>, VydError> {
+        let _scope = stage_scope(ctx, self.stage_type);
+        self.inner
+            .try_next_frame(ctx)
+            .map_err(|error| stage_error(self.stage_type, "next_frame", error))
     }
 
     pub fn get_processing_type(&self) -> ProcessingType {
@@ -32,9 +42,11 @@ impl Stage<dyn FrameSource> {
     }
 
     pub fn pipeline_ctx_init(&mut self, ctx: &mut PipelineContext) -> Result<(), VydError> {
+        let _scope = stage_scope(ctx, self.stage_type);
         self.inner.pipeline_ctx_init(ctx)
     }
     pub(crate) fn pipeline_finished(&mut self, ctx: &mut PipelineContext) -> Result<(), VydError> {
+        let _scope = stage_scope(ctx, self.stage_type);
         self.inner.pipeline_finished(ctx)
     }
 }
@@ -45,11 +57,23 @@ impl Stage<dyn FrameProcessor> {
         frame_ctx: &mut FrameContext,
         ctx: &mut PipelineContext,
     ) -> FrameProcessorResult {
-        let _scope = StageScope::new(self.stage_type);
+        let _scope = stage_scope(ctx, self.stage_type);
         let start_time = Instant::now();
         let result = self.inner.process(frame_ctx, ctx);
         record_duration(ctx, self.stage_type, start_time);
         result
+    }
+
+    pub fn try_process(
+        &mut self,
+        frame_ctx: &mut FrameContext,
+        ctx: &mut PipelineContext,
+    ) -> Result<FrameProcessorResult, VydError> {
+        let _scope = stage_scope(ctx, self.stage_type);
+        let start_time = Instant::now();
+        let result = self.inner.try_process(frame_ctx, ctx);
+        record_duration(ctx, self.stage_type, start_time);
+        result.map_err(|error| stage_error(self.stage_type, "process", error))
     }
 
     pub fn get_processing_type(&self) -> ProcessingType {
@@ -57,27 +81,43 @@ impl Stage<dyn FrameProcessor> {
     }
 
     pub fn pipeline_ctx_init(&mut self, ctx: &mut PipelineContext) -> Result<(), VydError> {
+        let _scope = stage_scope(ctx, self.stage_type);
         self.inner.pipeline_ctx_init(ctx)
     }
 
     pub(crate) fn pipeline_finished(&mut self, ctx: &mut PipelineContext) -> Result<(), VydError> {
+        let _scope = stage_scope(ctx, self.stage_type);
         self.inner.pipeline_finished(ctx)
     }
 }
 
 impl FrameSink for Stage<dyn FrameSink> {
     fn consume(&mut self, frame_ctx: &mut FrameContext, ctx: &mut PipelineContext) {
-        let _scope = StageScope::new(self.stage_type);
+        let _scope = stage_scope(ctx, self.stage_type);
         let start_time = Instant::now();
         self.inner.consume(frame_ctx, ctx);
         record_duration(ctx, self.stage_type, start_time);
     }
 
+    fn try_consume(
+        &mut self,
+        frame_ctx: &mut FrameContext,
+        ctx: &mut PipelineContext,
+    ) -> Result<(), VydError> {
+        let _scope = stage_scope(ctx, self.stage_type);
+        let start_time = Instant::now();
+        let result = self.inner.try_consume(frame_ctx, ctx);
+        record_duration(ctx, self.stage_type, start_time);
+        result.map_err(|error| stage_error(self.stage_type, "consume", error))
+    }
+
     fn pipeline_ctx_init(&mut self, ctx: &mut PipelineContext) -> Result<(), VydError> {
+        let _scope = stage_scope(ctx, self.stage_type);
         self.inner.pipeline_ctx_init(ctx)
     }
 
     fn pipeline_finished(&mut self, ctx: &mut PipelineContext) -> Result<(), VydError> {
+        let _scope = stage_scope(ctx, self.stage_type);
         self.inner.pipeline_finished(ctx)
     }
 
@@ -90,18 +130,17 @@ impl FrameSink for Stage<dyn FrameSink> {
     }
 }
 
-struct StageScope;
-
-impl StageScope {
-    fn new(stage_type: &'static str) -> Self {
-        StatsContext::set_current_stage(stage_type.to_string());
-        Self
-    }
+fn stage_scope(ctx: &PipelineContext, stage: &'static str) -> Option<StatsScope> {
+    ctx.try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics")
+        .ok()
+        .map(|stats| StatsContext::new(stats.clone()).for_stage(stage).enter())
 }
 
-impl Drop for StageScope {
-    fn drop(&mut self) {
-        StatsContext::clear_current_stage();
+fn stage_error(stage: &'static str, operation: &'static str, error: VydError) -> VydError {
+    VydError::StageFailed {
+        stage,
+        operation,
+        source: Box::new(error),
     }
 }
 

@@ -9,14 +9,15 @@ use gst::prelude::*;
 use gst::{Message, MessageView};
 
 use crate::config::*;
-use crate::create_shared_pool;
 use crate::gst_buffer_timing_meta::instrument_pipeline_with_timing_meta;
 use crate::gst_pipeline::*;
+use crate::managed_pool::ManagedFramePool;
 use crate::vyd_frame_queue::*;
+use crate::vyd_gst_sink::VydGstSink;
 use thiserror::Error;
 use vyd::statistics::{PipelineStatistics, ProcessingType};
 use vyd::traits::FrameSource;
-use vyd::{pipeline::PipelineContext, FrameContext, VydError};
+use vyd::{pipeline::PipelineContext, FrameContext};
 
 const FRAME_BLOCKING_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -34,8 +35,8 @@ pub enum GstSourceError {
     #[error("GStreamer state change error: {0}")]
     GstStateChangeError(#[from] gst::StateChangeError),
 
-    #[error("Bus error")]
-    BusError,
+    #[error("Bus error: {0}")]
+    BusError(String),
 }
 
 impl From<GstSourceError> for vyd::VydError {
@@ -80,6 +81,8 @@ pub struct GstSource {
     producer_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
     flow_control_handle: Option<thread::JoinHandle<()>>,
     play_state: Arc<AtomicU8>, // Store as u8 for atomic operations
+    producer_error: Arc<Mutex<Option<String>>>,
+    sink: VydGstSink,
 }
 
 impl GstSource {
@@ -114,12 +117,10 @@ impl GstSource {
         // tracing_gstreamer::integrate_spans();
 
         let pool = if config.zc_enabled {
-            // Use default buffer size - the pool will handle different sizes
-            let buffer_size = output_frame_queue.frame_info().frame_size;
-            Some(create_shared_pool(
-                buffer_size,
-                config.buffer_pool_slot_count,
-            ))
+            Some(
+                ManagedFramePool::new(config.buffer_pool_slot_count)
+                    .map_err(|error| GstSourceError::ConfigError(error.to_string()))?,
+            )
         } else {
             None
         };
@@ -134,9 +135,19 @@ impl GstSource {
                 build_rtsp_client_pipeline(&uri_str, output_frame_queue.clone(), pool)
             }
         }
-        .expect("Failed to build pipeline");
+        .map_err(|error| {
+            GstSourceError::GeneralInitError(format!("Failed to build pipeline: {error}"))
+        })?;
 
         let play_state = Arc::new(AtomicU8::new(PlayState::Initializing as u8));
+        let sink = pipeline
+            .iterate_elements()
+            .into_iter()
+            .filter_map(Result::ok)
+            .find_map(|element| element.downcast::<VydGstSink>().ok())
+            .ok_or_else(|| {
+                GstSourceError::GeneralInitError("Vyd GST source has no VydGstSink".into())
+            })?;
         let pipeline = Arc::new(pipeline);
 
         let flow_control_handle = if !live_mode {
@@ -156,6 +167,8 @@ impl GstSource {
             producer_handle: Arc::new(Mutex::new(None)),
             flow_control_handle,
             play_state,
+            producer_error: Arc::new(Mutex::new(None)),
+            sink,
         })
     }
 
@@ -273,9 +286,11 @@ impl GstSource {
         {
             let play_state = self.play_state.clone();
             let pipeline = self.pipeline.clone();
+            let producer_error = self.producer_error.clone();
             let handle = thread::spawn(move || {
                 if let Err(err) = Self::run_pipeline(pipeline.clone(), play_state) {
                     tracing::error!(?err, "gst pipeline error");
+                    *producer_error.lock().unwrap() = Some(err.to_string());
                 }
             });
 
@@ -294,16 +309,18 @@ impl GstSource {
     ) -> Result<(), GstSourceError> {
         instrument_pipeline_with_timing_meta(pipeline.as_ref());
 
-        pipeline.set_state(gst::State::Playing)?;
-
-        let result = Self::process_gst_messages(pipeline.as_ref(), play_state.clone());
+        let result = (|| {
+            pipeline.set_state(gst::State::Playing)?;
+            Self::process_gst_messages(pipeline.as_ref(), play_state.clone())
+        })();
 
         play_state.store(PlayState::Stopped as u8, Ordering::SeqCst);
 
         // perform clean gst shutdown
-        pipeline.set_state(gst::State::Null)?;
-
-        result
+        let stopped = pipeline.set_state(gst::State::Null);
+        result?;
+        stopped?;
+        Ok(())
     }
 
     fn process_gst_messages(
@@ -312,7 +329,9 @@ impl GstSource {
     ) -> Result<(), GstSourceError> {
         tracing::trace!("Starting gst msg processing loop");
 
-        let bus = pipeline.bus().ok_or(GstSourceError::BusError)?;
+        let bus = pipeline
+            .bus()
+            .ok_or_else(|| GstSourceError::BusError("pipeline has no bus".into()))?;
         loop {
             if PlayState::from(play_state.load(Ordering::SeqCst)) == PlayState::Stopped {
                 break;
@@ -325,9 +344,15 @@ impl GstSource {
                         play_state.store(PlayState::Eos as u8, Ordering::SeqCst);
                         break;
                     }
-                    MessageView::Error(_) => {
+                    MessageView::Error(err) => {
+                        let detail = format!(
+                            "{}: {} ({:?})",
+                            msg.src().map(|s| s.path_string()).unwrap_or_default(),
+                            err.error(),
+                            err.debug()
+                        );
                         log_gst_message(msg);
-                        break;
+                        return Err(GstSourceError::BusError(detail));
                     }
                     _ => log_gst_message(msg),
                 },
@@ -339,7 +364,9 @@ impl GstSource {
                     // If pipeline stopped unexpectedly, exit loop
                     if state == gst::State::Null {
                         tracing::warn!("Pipeline went to NULL state unexpectedly");
-                        break;
+                        return Err(GstSourceError::BusError(
+                            "pipeline entered NULL before EOS".into(),
+                        ));
                     }
                 }
             }
@@ -355,10 +382,15 @@ impl GstSource {
     ) -> Option<FrameContext> {
         let processing_start = Instant::now();
 
-        let FrameWithTiming { frame, timing_data } = frame_data;
+        let FrameWithTiming {
+            frame,
+            timing_data,
+            media_timing,
+        } = frame_data;
 
         let frame_index = Self::inc_frame_counter(ctx);
         let mut frame_ctx = FrameContext::new(frame, frame_index);
+        frame_ctx.timing = media_timing;
 
         if let Some(timing_data) = timing_data {
             if let Ok(stats) = ctx.try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics") {
@@ -394,37 +426,67 @@ impl GstSource {
 
 impl FrameSource for GstSource {
     fn next_frame(&mut self, ctx: &mut PipelineContext) -> Option<FrameContext> {
-        let frame_data = match self.get_play_state() {
-            PlayState::Initializing => {
-                let _ = self.start_producer_thread();
-                return self.next_frame(ctx);
+        match self.try_next_frame(ctx) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::error!(?error, "GStreamer source failed");
+                None
             }
+        }
+    }
 
-            PlayState::Playing => loop {
-                if ctx
-                    .try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics")
-                    .is_ok_and(|stats| !stats.is_running())
-                {
-                    return None;
+    fn try_next_frame(
+        &mut self,
+        ctx: &mut PipelineContext,
+    ) -> Result<Option<FrameContext>, vyd::VydError> {
+        if self.get_play_state() == PlayState::Initializing {
+            if let Ok(stats) = ctx.try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics") {
+                self.sink.set_statistics(stats.clone());
+            }
+            self.start_producer_thread().map_err(vyd::VydError::from)?;
+        }
+        loop {
+            if ctx
+                .try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics")
+                .is_ok_and(|stats| !stats.is_running())
+            {
+                return Ok(None);
+            }
+            if let Some(frame_data) = self.frames_out_queue.try_read_frame() {
+                return Ok(self.create_frame_ctx(frame_data, ctx));
+            }
+            match self.get_play_state() {
+                PlayState::Playing => {
+                    if let Some(frame_data) =
+                        self.frames_out_queue.read_frame(FRAME_BLOCKING_TIMEOUT)
+                    {
+                        return Ok(self.create_frame_ctx(frame_data, ctx));
+                    }
                 }
-                if let Some(frame_data) = self.frames_out_queue.read_frame(FRAME_BLOCKING_TIMEOUT) {
-                    break Some(frame_data);
+                PlayState::Eos => return Ok(None),
+                PlayState::Stopped => {
+                    if let Some(failure) = self.producer_error.lock().unwrap().as_ref() {
+                        return Err(vyd::VydError::GeneralPluginError(failure.clone()));
+                    }
+                    // The producer publishes its failure immediately after
+                    // marking Stopped; wait for that publication via join.
+                    if let Some(handle) = self.producer_handle.lock().unwrap().take() {
+                        handle.join().map_err(|_| {
+                            vyd::VydError::GeneralPluginError(
+                                "GStreamer source thread panicked".into(),
+                            )
+                        })?;
+                    }
+                    if let Some(failure) = self.producer_error.lock().unwrap().as_ref() {
+                        return Err(vyd::VydError::GeneralPluginError(failure.clone()));
+                    }
+                    return Ok(None);
                 }
-
-                if self.get_play_state() == PlayState::Stopped {
-                    tracing::debug!("gst pipeline stopped whilst waiting");
-                    return self.next_frame(ctx);
+                PlayState::Initializing => {
+                    self.start_producer_thread().map_err(vyd::VydError::from)?
                 }
-
-                tracing::info!("timeout waiting for a frame");
-            },
-
-            _ => self.frames_out_queue.try_read_frame(),
-        };
-
-        let frame_ctx = frame_data.and_then(|frame_data| self.create_frame_ctx(frame_data, ctx));
-        tracing::trace!("Emitting frame");
-        frame_ctx
+            }
+        }
     }
 
     fn pipeline_finished(&mut self, _ctx: &mut PipelineContext) -> Result<(), vyd::VydError> {

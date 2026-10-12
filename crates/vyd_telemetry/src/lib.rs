@@ -12,6 +12,16 @@ pub fn run_pipeline_with_config_file_path(
     stats: std::sync::Arc<vyd::statistics::PipelineStatistics>,
     dump_dir: Option<std::path::PathBuf>,
 ) -> Result<vyd::pipeline::PipelineContext, vyd::VydError> {
+    let (context, pipeline) = prepare_pipeline_with_config_file_path(path, dump_dir)?;
+    vyd::pipeline::run_pipeline(context, pipeline, Some(stats))
+}
+
+/// Build a configured pipeline with the same telemetry hooks for either migration
+/// runtime, without making the generic telemetry crate depend on GStreamer.
+pub fn prepare_pipeline_with_config_file_path(
+    path: &std::path::Path,
+    dump_dir: Option<std::path::PathBuf>,
+) -> Result<(vyd::pipeline::PipelineContext, vyd::pipeline::Pipeline), vyd::VydError> {
     let config_raw = std::fs::read_to_string(path)?;
     let config: vyd::pipeline::PipelineConfig = toml::from_str(&config_raw)?;
     let pipeline = vyd::pipeline::build_pipeline(&config)?;
@@ -25,5 +35,5 @@ pub fn run_pipeline_with_config_file_path(
             .with_source(config.source_type().to_string())
             .attach(&mut context);
     }
-    vyd::pipeline::run_pipeline(context, pipeline, Some(stats))
+    Ok((context, pipeline))
 }

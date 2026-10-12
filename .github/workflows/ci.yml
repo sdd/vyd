@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Nightly introduces new warnings frequently; Clippy gates the selected lint
+# groups explicitly below.
+env:
+  RUSTFLAGS: ""
+  CARGO_BUILD_WARNINGS: warn
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  formatting:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rustfmt
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: taplo-cli@0.10.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Rust formatting
+        run: cargo fmt --all --check
+      - name: TOML formatting
+        run: taplo format --check Cargo.toml release-plz.toml crates/*/Cargo.toml examples/*.toml
+      - name: Markdown and YAML formatting
+        run: npx --yes prettier@3.6.2 --check "**/*.md" ".github/**/*.{yml,yaml}" .commitlintrc.yaml .pre-commit-config.yaml codecov.yml
+
+  actionlint:
+    name: GitHub Actions lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
+  commitlint:
+    name: Commit lint
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: wagoid/commitlint-github-action@v6
+        with:
+          configFile: .commitlintrc.yaml
+
+  clippy:
+    name: Clippy and rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: clippy
+      - name: Install GStreamer headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D clippy::correctness -D clippy::suspicious
+      - name: Rustdoc links
+        run: RUSTDOCFLAGS='-D rustdoc::broken_intra_doc_links' cargo doc --workspace --all-features --no-deps --locked
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+      - name: Install GStreamer headers and software Vulkan
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base libvulkan1 mesa-vulkan-drivers
+      - name: Test default features
+        run: cargo test --workspace --locked
+      - name: Test all features
+        run: cargo test --workspace --all-features --locked
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install GStreamer headers and software Vulkan
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base libvulkan1 mesa-vulkan-drivers
+      - name: Generate LCOV report
+        run: cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+      - name: Check Codecov token
+        id: codecov-token
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        run: |
+          if [ -n "$CODECOV_TOKEN" ]; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: codecov/codecov-action@v7
+        if: steps.codecov-token.outputs.available == 'true'
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: true

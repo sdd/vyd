@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use tracing;
-use vyd::frame::{CpuStorage, CpuStorageShared, FrameError};
+use vyd::frame::{CpuStorageShared, FrameError};
 use vyd::Frame;
 
 /// A frame buffer that owns memory from the pool and implements CpuStorageShared
@@ -37,44 +37,8 @@ impl CpuStorageShared for FrameBuffer {
     }
 
     fn try_into_owned(self: Box<Self>) -> Result<Vec<u8>, Box<dyn CpuStorageShared>> {
-        Ok(self.data.to_vec())
-    }
-
-    fn lease_and_copy(&self) -> Option<CpuStorage> {
-        // Lease another FrameBuffer from the pool and copy our data into it
-        let mut pool_state = self.pool_state.lock().ok()?;
-
-        // Allocate a new buffer handle from the pool
-        let mut handle = pool_state.alloc()?;
-        let buffer_ptr = handle.as_ptr();
-
-        // Copy our data into the leased buffer
-        let leased_slice = handle.as_mut_slice();
-        let copy_len = std::cmp::min(leased_slice.len(), self.data.len());
-        leased_slice[..copy_len].copy_from_slice(&self.data[..copy_len]);
-
-        // Now we need to convert this allocated buffer into a FrameBuffer
-        let slot_index = pool_state.get_slot_index(buffer_ptr)?;
-
-        // Transition from AllocRaw to AllocArc
-        pool_state.slots[slot_index].usage = SlotUsage::AllocArc;
-
-        // Create the Bytes slice for the copied data
-        let slot_buffer = &pool_state.slots[slot_index].buffer;
-        let frame_data = slot_buffer.slice(0..copy_len);
-
-        // Create a new FrameBuffer that manages this leased slot
-        let leased_frame_buffer = FrameBuffer {
-            pool_state: Arc::clone(&self.pool_state),
-            slot_index,
-            data: frame_data,
-        };
-
-        // Drop the handle since we've converted to FrameBuffer management
-        drop(handle);
-
-        // Return as shared CpuStorage (zero-copy lease from pool)
-        Some(CpuStorage::from_shared(leased_frame_buffer))
+        // Bytes::to_vec copies; never report it as an ownership transfer.
+        Err(self)
     }
 }
 
@@ -113,10 +77,6 @@ struct MemorySlot {
 impl MemorySlot {
     fn is_free(&self) -> bool {
         self.usage.is_free()
-    }
-
-    fn is_alloc_raw(&self) -> bool {
-        matches!(self.usage, SlotUsage::AllocRaw)
     }
 }
 
@@ -495,17 +455,6 @@ impl FrameBufferPoolState {
                 false
             }
         }
-    }
-
-    /// Mark a specific slot as available (for allocator integration)
-    fn mark_slot_available(&mut self, slot_index: usize) -> bool {
-        if let Some(slot) = self.slots.get_mut(slot_index) {
-            if !slot.is_free() {
-                slot.usage = SlotUsage::Free;
-                return true;
-            }
-        }
-        false
     }
 
     /// Find which slot index corresponds to this pointer
@@ -938,10 +887,10 @@ mod tests {
     }
 
     #[test]
-    fn test_frame_buffer_try_into_owned_success() {
+    fn test_frame_buffer_refuses_copy_disguised_as_ownership_transfer() {
         let pool = FrameBufferPool::new(16, 2);
 
-        // Create data that will truly be owned by a single Arc
+        // Bytes remains a pool-owned backing even with one FrameBuffer handle.
         let data = Bytes::from(vec![42u8; 16]);
 
         // Create FrameBuffer and immediately box it to avoid extra references
@@ -953,18 +902,43 @@ mod tests {
 
         let boxed_buffer = Box::new(frame_buffer);
 
-        // Should succeed now that we properly move the Arc instead of cloning it
         let result = boxed_buffer.try_into_owned();
-
         match result {
-            Ok(vec) => {
-                assert_eq!(vec.len(), 16);
-                assert_eq!(vec[0], 42);
-                // Slot should be available now
-                assert_eq!(pool.available_count(), 2);
+            Err(buffer) => {
+                assert_eq!(buffer.len(), 16);
+                assert_eq!(buffer[0], 42);
+                drop(buffer);
             }
-            Err(_) => panic!("Expected success - Arc should have been moved properly"),
+            Ok(_) => panic!("copy was misreported as a transfer"),
         }
+        assert_eq!(pool.available_count(), 2);
+    }
+
+    #[test]
+    fn pooled_frame_cow_counts_one_copy_and_returns_backing_after_last_clone() {
+        use vyd::statistics::{PipelineStatistics, StatsContext};
+        let mut pool = FrameBufferPool::new(4, 1);
+        let pointer = pool.alloc().unwrap().as_ptr();
+        let mut frame = pool.acquire_frame_from_ptr(pointer, 2, 2).unwrap();
+        let retained = frame.clone_shared();
+        assert_eq!(pool.available_count(), 0);
+
+        let stats = Arc::new(PipelineStatistics::new());
+        let _scope = StatsContext::new(stats.clone()).for_stage("cow").enter();
+        let Frame::Cpu(cpu) = &mut frame else {
+            panic!("expected CPU frame")
+        };
+        cpu.img.as_mut()[0] = 9;
+        assert_eq!(frame.as_cpu_ref().unwrap()[0], 9);
+        assert_eq!(retained.as_cpu_ref().unwrap()[0], 0);
+        assert_eq!(pool.available_count(), 0);
+        drop(retained);
+        assert_eq!(pool.available_count(), 1);
+        let memory = stats.snapshot().memory_operations;
+        assert_eq!(memory["cow_cpu_copy_bytes"], 4);
+        assert_eq!(memory["cow_cpu_copy_count"], 1);
+        assert_eq!(memory["cow_cpu_alloc_bytes"], 4);
+        assert!(!memory.contains_key("cow_zero_copy"));
     }
 
     #[test]

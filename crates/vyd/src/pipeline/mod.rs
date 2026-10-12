@@ -7,19 +7,33 @@ use std::time::Instant;
 use serde::Deserialize;
 use toml::Value;
 
+mod services;
+mod session;
+pub use session::PipelineSession;
 pub(crate) mod timing;
 pub(crate) mod wrappers;
+pub use services::PipelineServices;
 pub use wrappers::Stage;
 
-use crate::pipeline::timing::log_frame_timing_summary;
+use crate::frame::factory::FrameFactory;
 use crate::pipeline::wrappers::{FrameProcessorWrapper, FrameSinkWrapper, FrameSourceWrapper};
-use crate::statistics::{PipelineStatistics, StatsContext};
+use crate::statistics::PipelineStatistics;
 use crate::traits::{FrameProcessor, FrameSink, FrameSource, StageFactory};
 use crate::{FrameProcessorResult, VydError};
 
 pub type PipelineContextValue = Box<dyn Any + Send + Sync>;
 
 pub struct PipelineContext {
+    services: PipelineServices,
+    frame_factory: FrameFactory,
+    #[cfg(feature = "gpu-wgpu")]
+    gpu: Option<Arc<crate::gpu::WgpuContext>>,
+    #[cfg(feature = "gpu-wgpu")]
+    gpu_frozen: bool,
+    #[cfg(feature = "gpu-wgpu")]
+    gpu_pool_limits: crate::gpu::pool::GpuPoolLimits,
+    #[cfg(feature = "gpu-wgpu")]
+    gpu_transfer: Option<Arc<crate::gpu::transfer::GpuTransfer>>,
     metadata: HashMap<String, PipelineContextValue>,
     observers: Vec<Box<dyn PipelineObserver>>,
 }
@@ -29,6 +43,16 @@ impl std::fmt::Debug for PipelineContext {
         f.debug_struct("PipelineContext")
             .field("metadata_keys", &self.metadata.keys().collect::<Vec<_>>())
             .field("observer_count", &self.observers.len())
+            .field("gpu_configured", &{
+                #[cfg(feature = "gpu-wgpu")]
+                {
+                    self.gpu.is_some()
+                }
+                #[cfg(not(feature = "gpu-wgpu"))]
+                {
+                    false
+                }
+            })
             .finish()
     }
 }
@@ -41,7 +65,8 @@ pub trait PipelineObserver: Send + Sync {
         Ok(())
     }
 
-    /// Called for every sourced frame, including frames skipped by a processor.
+    /// Called after each successfully handled frame, including processor skips.
+    /// A source, processor or sink error terminates processing before this hook.
     fn frame_processed(
         &mut self,
         _frame: &crate::FrameContext,
@@ -64,9 +89,107 @@ impl Default for PipelineContext {
 impl PipelineContext {
     pub fn new() -> Self {
         Self {
+            services: PipelineServices::default(),
+            frame_factory: FrameFactory::default(),
+            #[cfg(feature = "gpu-wgpu")]
+            gpu: None,
+            #[cfg(feature = "gpu-wgpu")]
+            gpu_frozen: false,
+            #[cfg(feature = "gpu-wgpu")]
+            gpu_pool_limits: crate::gpu::pool::GpuPoolLimits::new(128, 512 * 1024 * 1024)
+                .expect("positive default GPU pool limits"),
+            #[cfg(feature = "gpu-wgpu")]
+            gpu_transfer: None,
             metadata: HashMap::new(),
             observers: Vec::new(),
         }
+    }
+
+    /// Clone this handle to share typed services/latest values with workers.
+    /// The legacy string-keyed metadata and lifecycle observers remain local to
+    /// this context during migration; they are not copied into the registry.
+    pub fn services(&self) -> &PipelineServices {
+        &self.services
+    }
+
+    /// Configure the per-pipeline CPU frame factory before stages start.
+    pub fn set_frame_factory(&mut self, factory: FrameFactory) {
+        self.frame_factory = factory;
+    }
+
+    pub fn frame_factory(&self) -> &FrameFactory {
+        &self.frame_factory
+    }
+
+    /// Attach the pipeline's single GPU context before stages start. Reattaching
+    /// the same context is harmless; a different device is rejected.
+    #[cfg(feature = "gpu-wgpu")]
+    pub fn set_wgpu_context(
+        &mut self,
+        gpu: Arc<crate::gpu::WgpuContext>,
+    ) -> Result<(), crate::gpu::GpuContextError> {
+        if self.gpu_frozen {
+            return Err(crate::gpu::GpuContextError::ConfigurationLocked);
+        }
+        if let Some(existing) = &self.gpu {
+            existing.ensure_same_device(&gpu)?;
+        }
+        self.gpu = Some(gpu);
+        Ok(())
+    }
+
+    #[cfg(feature = "gpu-wgpu")]
+    pub fn wgpu_context(
+        &self,
+    ) -> Result<&Arc<crate::gpu::WgpuContext>, crate::gpu::GpuContextError> {
+        self.gpu
+            .as_ref()
+            .ok_or(crate::gpu::GpuContextError::NotConfigured)
+    }
+
+    /// Configure the bounded GPU resource pool before a pipeline starts.
+    #[cfg(feature = "gpu-wgpu")]
+    pub fn set_gpu_pool_limits(
+        &mut self,
+        limits: crate::gpu::pool::GpuPoolLimits,
+    ) -> Result<(), crate::gpu::GpuContextError> {
+        if self.gpu_frozen {
+            return Err(crate::gpu::GpuContextError::ConfigurationLocked);
+        }
+        self.gpu_pool_limits = limits;
+        Ok(())
+    }
+
+    /// The one transfer service shared by Rust stages and the GST adapter.
+    /// It is installed before observer and stage initialization.
+    #[cfg(feature = "gpu-wgpu")]
+    pub fn gpu_transfer(
+        &self,
+    ) -> Result<&Arc<crate::gpu::transfer::GpuTransfer>, crate::gpu::GpuContextError> {
+        self.gpu_transfer
+            .as_ref()
+            .ok_or(crate::gpu::GpuContextError::NotConfigured)
+    }
+
+    #[cfg(feature = "gpu-wgpu")]
+    pub(crate) fn install_gpu_transfer(
+        &mut self,
+        stats: Arc<PipelineStatistics>,
+    ) -> Result<(), VydError> {
+        if let Some(gpu) = &self.gpu {
+            let pool = crate::gpu::pool::GpuPoolManager::new(gpu.clone(), self.gpu_pool_limits);
+            self.gpu_transfer = Some(Arc::new(crate::gpu::transfer::GpuTransfer::new(
+                gpu.clone(),
+                pool,
+                crate::statistics::StatsContext::new(stats),
+            )?));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "gpu-wgpu")]
+    pub(crate) fn freeze_wgpu_context(&mut self) {
+        self.gpu_frozen = true;
     }
 
     pub fn add_observer(&mut self, observer: impl PipelineObserver + 'static) {
@@ -209,9 +332,10 @@ macro_rules! _register_vyd_stage_impl {
                 }
 
                 fn stage_type(&self) -> &'static str {
-                    $crate::paste::paste! {
-                        concat!($crate_name, "::", stringify!($stage_type))
-                    }
+                    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+                    NAME.get_or_init(|| {
+                        format!("{}::{}", $crate_name.replace('-', "_"), stringify!($stage_type))
+                    })
                 }
             }
 
@@ -330,126 +454,34 @@ pub fn build_pipeline(config: &PipelineConfig) -> Result<Pipeline, VydError> {
 }
 
 pub fn run_pipeline(
-    mut pipeline_context: PipelineContext,
+    pipeline_context: PipelineContext,
     pipeline: Pipeline,
     stats: Option<Arc<PipelineStatistics>>,
 ) -> Result<PipelineContext, VydError> {
-    let Pipeline {
-        mut source,
-        mut stages,
-        mut sink,
-    } = pipeline;
     let stats = stats.unwrap_or_else(|| Arc::new(PipelineStatistics::new()));
-    pipeline_context.put("pipeline_statistics", stats.clone());
-    StatsContext::set_global_stats(stats.clone());
-    let _stats_scope = StatisticsScope;
-
-    stats.register_stage(source.stage_type, source.get_processing_type());
-    for stage in &stages {
-        stats.register_stage(stage.stage_type, stage.get_processing_type());
-    }
-    stats.register_stage(sink.stage_type, sink.processing_type());
-
-    let mut observers = std::mem::take(&mut pipeline_context.observers);
-    let mut observers_started = 0;
-    let mut source_started = false;
-    let mut stages_started = 0;
-    let mut sink_started = false;
-    let pipeline_start = Instant::now();
-    let mut frame_count = 0u64;
-
+    let mut session = PipelineSession::new(pipeline_context, pipeline, stats);
     let result = (|| {
-        for observer in &mut observers {
-            observers_started += 1;
-            observer.pipeline_started(&mut pipeline_context)?;
-        }
-        source_started = true;
-        source.pipeline_ctx_init(&mut pipeline_context)?;
-        for stage in &mut stages {
-            stages_started += 1;
-            stage.pipeline_ctx_init(&mut pipeline_context)?;
-        }
-        sink_started = true;
-        sink.pipeline_ctx_init(&mut pipeline_context)?;
-
-        while stats.is_running() {
-            let Some(mut frame) = source.next_frame(&mut pipeline_context) else {
-                break;
-            };
-            let frame_start = Instant::now();
-            frame_count += 1;
-            let mut continue_processing = true;
-            for stage in &mut stages {
+        session.start()?;
+        while let Some(mut frame) = session.next_frame()? {
+            let started = Instant::now();
+            let mut emit = true;
+            for index in 0..session.processor_count() {
                 if matches!(
-                    stage.process(&mut frame, &mut pipeline_context),
+                    session.process(index, &mut frame)?,
                     FrameProcessorResult::Skip
                 ) {
-                    continue_processing = false;
+                    emit = false;
                     break;
                 }
             }
-            if continue_processing {
-                sink.consume(&mut frame, &mut pipeline_context);
+            if emit {
+                session.consume(&mut frame)?;
             }
-            let duration_us = frame_start.elapsed().as_micros() as u64;
-            stats.record_frame(duration_us);
-            log_frame_timing_summary(&frame, frame_count, duration_us);
-            for observer in &mut observers {
-                observer.frame_processed(&frame, &mut pipeline_context)?;
-            }
-            if frame_count.is_multiple_of(100) {
-                let elapsed = pipeline_start.elapsed().as_secs_f64();
-                tracing::info!(
-                    frames_processed = frame_count,
-                    elapsed_seconds = elapsed,
-                    fps = frame_count as f64 / elapsed,
-                    "Pipeline throughput"
-                );
-            }
+            session.complete_frame(&frame, started)?;
         }
         Ok(())
     })();
-
-    // Attempt every finalizer even if a preceding hook or finalizer failed.
-    let mut failure = result.err();
-    let mut finish = |result: Result<(), VydError>| {
-        if let Err(error) = result {
-            tracing::error!(?error, "Pipeline finalizer failed");
-            if failure.is_none() {
-                failure = Some(error);
-            }
-        }
-    };
-    if source_started {
-        finish(source.pipeline_finished(&mut pipeline_context));
-    }
-    for stage in stages.iter_mut().take(stages_started) {
-        finish(stage.pipeline_finished(&mut pipeline_context));
-    }
-    if sink_started {
-        finish(sink.pipeline_finished(&mut pipeline_context));
-    }
-    for observer in observers.iter_mut().take(observers_started) {
-        finish(observer.pipeline_finished(&mut pipeline_context));
-    }
-    pipeline_context.observers.splice(0..0, observers);
-
-    tracing::info!(
-        total_frames = frame_count,
-        total_duration_seconds = pipeline_start.elapsed().as_secs_f64(),
-        "Pipeline finished"
-    );
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    Ok(pipeline_context)
-}
-
-struct StatisticsScope;
-impl Drop for StatisticsScope {
-    fn drop(&mut self) {
-        StatsContext::clear_global_stats();
-    }
+    session.finish(result)
 }
 
 pub fn run_pipeline_with_config_file_path(
