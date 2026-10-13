@@ -30,5 +30,5 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-vyd_telemetry = { package = "vyd-telemetry", path = "../vyd_telemetry", version = "0.1.0" }
+vyd_telemetry = { package = "vyd-telemetry", path = "../vyd_telemetry" }
 serde_json = { workspace = true }
