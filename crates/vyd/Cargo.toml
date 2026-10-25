@@ -14,6 +14,7 @@ default = []
 gpu-wgpu = ["vyd-core/gpu-wgpu", "vyd-gstreamer/gpu-wgpu"]
 
 [dependencies]
+parse-size = "1.1"
 vyd-core = { workspace = true }
 vyd-gstreamer = { path = "../vyd_gstreamer", version = "0.2.0" }
 vyd-telemetry = { path = "../vyd_telemetry", version = "0.2.0" }
