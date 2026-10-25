@@ -3,6 +3,8 @@ pub use vyd_core::*;
 
 use std::path::Path;
 use std::sync::Arc;
+use vyd_core::frame::factory::FrameFactory;
+use vyd_core::frame::pool::{BufferPoolManager, PoolLimits};
 use vyd_core::pipeline::{Pipeline as StagePipeline, PipelineContext};
 use vyd_core::statistics::PipelineStatistics;
 use vyd_gstreamer::runtime::NativeNode;
@@ -29,6 +31,7 @@ impl PipelineBuilder {
         let stages: vyd_core::pipeline::PipelineConfig = toml::from_str(&raw_config)?;
         let nodes = vyd_gstreamer::pipeline_config::nodes_from_config(&config)?;
         let mut context = PipelineContext::new();
+        configure_cpu_pool(&config, &mut context)?;
         vyd_gstreamer::pipeline_config::configure_gpu(&config, &mut context)?;
         Ok(Self {
             raw_config,
@@ -87,6 +90,72 @@ impl PipelineBuilder {
             stages: self.stages,
             statistics: self.statistics,
             nodes: self.nodes,
+        }
+    }
+}
+
+fn configure_cpu_pool(config: &toml::Value, context: &mut PipelineContext) -> Result<(), VydError> {
+    let Some(value) = config.get("cpu_pool") else {
+        return Ok(());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| VydError::GeneralPluginError("cpu_pool must be a table".into()))?;
+    for key in table.keys() {
+        if key != "max_buffers" && key != "max_bytes" {
+            return Err(VydError::GeneralPluginError(format!(
+                "unknown cpu_pool field: {key}"
+            )));
+        }
+    }
+    let read_limit = |key: &str| -> Result<Option<usize>, VydError> {
+        table
+            .get(key)
+            .map(|value| {
+                value
+                    .as_integer()
+                    .and_then(|number| usize::try_from(number).ok())
+                    .ok_or_else(|| {
+                        VydError::GeneralPluginError(format!(
+                            "cpu_pool.{key} must be a positive integer"
+                        ))
+                    })
+            })
+            .transpose()
+    };
+    let limits = PoolLimits::new(read_limit("max_buffers")?, read_limit("max_bytes")?)
+        .map_err(|error| VydError::GeneralPluginError(format!("invalid cpu_pool: {error}")))?;
+    context.set_frame_factory(FrameFactory::new(BufferPoolManager::new(limits)));
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_pool_config_sets_bounds_without_allocating() {
+        let config: toml::Value =
+            toml::from_str("[cpu_pool]\nmax_buffers = 96\nmax_bytes = 1610612736\n").unwrap();
+        let mut context = PipelineContext::new();
+        configure_cpu_pool(&config, &mut context).unwrap();
+        let snapshot = context.frame_factory().cpu_pool().snapshot().unwrap();
+        assert_eq!(snapshot.limits.max_buffers(), 96);
+        assert_eq!(snapshot.limits.max_bytes(), 1_610_612_736);
+        assert_eq!(snapshot.allocated_buffers, 0);
+        assert_eq!(snapshot.allocated_bytes, 0);
+    }
+
+    #[test]
+    fn cpu_pool_config_rejects_invalid_bounds() {
+        for section in [
+            "[cpu_pool]\nmax_buffers = 0\n",
+            "[cpu_pool]\nmax_buffers = -1\n",
+            "[cpu_pool]\nmax_bytes = 'large'\n",
+            "[cpu_pool]\nother = 2\n",
+        ] {
+            let config: toml::Value = toml::from_str(section).unwrap();
+            assert!(configure_cpu_pool(&config, &mut PipelineContext::new()).is_err());
         }
     }
 }
