@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/sdd/vyd/compare/vyd-main/0.1.0...vyd-main/0.2.0) - 2026-10-25
+
+### Added
+
+- [**breaking**] refactor core into own crate
+
 ## [0.1.0](https://github.com/sdd/vyd/releases/tag/vyd-main/0.1.0) - 2026-10-12
 
 ### Added
