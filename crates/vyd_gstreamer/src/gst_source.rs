@@ -15,9 +15,9 @@ use crate::managed_pool::ManagedFramePool;
 use crate::vyd_frame_queue::*;
 use crate::vyd_gst_sink::VydGstSink;
 use thiserror::Error;
-use vyd::statistics::{PipelineStatistics, ProcessingType};
-use vyd::traits::FrameSource;
-use vyd::{pipeline::PipelineContext, FrameContext};
+use vyd_core::statistics::{PipelineStatistics, ProcessingType};
+use vyd_core::traits::FrameSource;
+use vyd_core::{pipeline::PipelineContext, FrameContext};
 
 const FRAME_BLOCKING_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -39,9 +39,9 @@ pub enum GstSourceError {
     BusError(String),
 }
 
-impl From<GstSourceError> for vyd::VydError {
+impl From<GstSourceError> for vyd_core::VydError {
     fn from(err: GstSourceError) -> Self {
-        vyd::VydError::GeneralPluginError(format!("{:?}", err))
+        vyd_core::VydError::GeneralPluginError(format!("{:?}", err))
     }
 }
 
@@ -109,16 +109,11 @@ impl GstSource {
         let live_mode = config.input.is_live_mode();
         let output_frame_queue = Arc::new(VydFrameQueue::new(frame_info, 10, live_mode));
 
-        // See https://lib.rs/crates/tracing-gstreamer
-        // See also https://gstreamer.freedesktop.org/documentation/tutorials/basic/debugging-tools.html?gi-language=rust
-        // tracing_gstreamer::integrate_events();
-        // gst::debug_remove_default_log_function();
-        gst::init()?;
-        // tracing_gstreamer::integrate_spans();
+        crate::initialize_gstreamer_tracing()?;
 
         let pool = if config.zc_enabled {
             Some(
-                ManagedFramePool::new(config.buffer_pool_slot_count)
+                ManagedFramePool::new(Some(config.buffer_pool_slot_count), None)
                     .map_err(|error| GstSourceError::ConfigError(error.to_string()))?,
             )
         } else {
@@ -172,27 +167,31 @@ impl GstSource {
         })
     }
 
-    fn shutdown(&mut self) -> Result<(), vyd::VydError> {
+    fn shutdown(&mut self) -> Result<(), vyd_core::VydError> {
         self.play_state
             .store(PlayState::Stopped as u8, Ordering::SeqCst);
         self.frames_out_queue.clear_state_sender();
         let mut error = None;
         if let Some(handle) = self.flow_control_handle.take() {
             if handle.join().is_err() {
-                error = Some(vyd::VydError::GeneralPluginError(
+                error = Some(vyd_core::VydError::GeneralPluginError(
                     "GStreamer flow control thread panicked".into(),
                 ));
             }
         }
         if let Err(failure) = self.pipeline.set_state(gst::State::Null) {
             error.get_or_insert_with(|| {
-                vyd::VydError::GeneralPluginError(format!("GStreamer shutdown failed: {failure}"))
+                vyd_core::VydError::GeneralPluginError(format!(
+                    "GStreamer shutdown failed: {failure}"
+                ))
             });
         }
         if let Some(handle) = self.producer_handle.lock().unwrap().take() {
             if handle.join().is_err() {
                 error.get_or_insert_with(|| {
-                    vyd::VydError::GeneralPluginError("GStreamer producer thread panicked".into())
+                    vyd_core::VydError::GeneralPluginError(
+                        "GStreamer producer thread panicked".into(),
+                    )
                 });
             }
         }
@@ -438,12 +437,13 @@ impl FrameSource for GstSource {
     fn try_next_frame(
         &mut self,
         ctx: &mut PipelineContext,
-    ) -> Result<Option<FrameContext>, vyd::VydError> {
+    ) -> Result<Option<FrameContext>, vyd_core::VydError> {
         if self.get_play_state() == PlayState::Initializing {
             if let Ok(stats) = ctx.try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics") {
                 self.sink.set_statistics(stats.clone());
             }
-            self.start_producer_thread().map_err(vyd::VydError::from)?;
+            self.start_producer_thread()
+                .map_err(vyd_core::VydError::from)?;
         }
         loop {
             if ctx
@@ -466,30 +466,30 @@ impl FrameSource for GstSource {
                 PlayState::Eos => return Ok(None),
                 PlayState::Stopped => {
                     if let Some(failure) = self.producer_error.lock().unwrap().as_ref() {
-                        return Err(vyd::VydError::GeneralPluginError(failure.clone()));
+                        return Err(vyd_core::VydError::GeneralPluginError(failure.clone()));
                     }
                     // The producer publishes its failure immediately after
                     // marking Stopped; wait for that publication via join.
                     if let Some(handle) = self.producer_handle.lock().unwrap().take() {
                         handle.join().map_err(|_| {
-                            vyd::VydError::GeneralPluginError(
+                            vyd_core::VydError::GeneralPluginError(
                                 "GStreamer source thread panicked".into(),
                             )
                         })?;
                     }
                     if let Some(failure) = self.producer_error.lock().unwrap().as_ref() {
-                        return Err(vyd::VydError::GeneralPluginError(failure.clone()));
+                        return Err(vyd_core::VydError::GeneralPluginError(failure.clone()));
                     }
                     return Ok(None);
                 }
-                PlayState::Initializing => {
-                    self.start_producer_thread().map_err(vyd::VydError::from)?
-                }
+                PlayState::Initializing => self
+                    .start_producer_thread()
+                    .map_err(vyd_core::VydError::from)?,
             }
         }
     }
 
-    fn pipeline_finished(&mut self, _ctx: &mut PipelineContext) -> Result<(), vyd::VydError> {
+    fn pipeline_finished(&mut self, _ctx: &mut PipelineContext) -> Result<(), vyd_core::VydError> {
         self.shutdown()
     }
 

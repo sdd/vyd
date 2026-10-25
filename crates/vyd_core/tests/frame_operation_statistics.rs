@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
-use vyd::frame::PixelFormat;
-use vyd::statistics::{
+use vyd_core::frame::PixelFormat;
+use vyd_core::statistics::{
     ConversionLocation, FrameOperationBytes, FrameOperationKind, PackingDirection,
     PipelineStatistics, ResourceOwnerId, StatsContext,
 };

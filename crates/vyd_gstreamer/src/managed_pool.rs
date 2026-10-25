@@ -4,10 +4,10 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use gst::glib::translate::from_glib_full;
-use vyd::frame::pool::{BufferPoolManager, CpuBufferLease, PoolError, PoolLimits, WaitPolicy};
-use vyd::frame::{CpuStorageShared, FrameError};
-use vyd::statistics::{MemoryOperation, PipelineStatistics};
-use vyd::Frame;
+use vyd_core::frame::pool::{BufferPoolManager, CpuBufferLease, PoolError, PoolLimits, WaitPolicy};
+use vyd_core::frame::{CpuStorageShared, FrameError};
+use vyd_core::statistics::{MemoryOperation, PipelineStatistics};
+use vyd_core::Frame;
 
 struct CurrentPool {
     bytes: usize,
@@ -28,11 +28,14 @@ pub struct ManagedFramePool {
 }
 
 impl ManagedFramePool {
-    pub fn new(max_buffers: usize) -> Result<Arc<Self>, PoolError> {
-        PoolLimits::new(max_buffers, 1)?;
-        u32::try_from(max_buffers).map_err(|_| PoolError::Overflow)?;
+    pub fn new(
+        max_buffers: Option<usize>,
+        max_bytes: Option<usize>,
+    ) -> Result<Arc<Self>, PoolError> {
+        let limits = PoolLimits::new(max_buffers, max_bytes)?;
+        u32::try_from(limits.max_buffers()).map_err(|_| PoolError::Overflow)?;
         Ok(Arc::new(Self {
-            max_buffers,
+            max_buffers: limits.max_buffers(),
             current: Mutex::new(None),
             active: Mutex::new(HashMap::new()),
             statistics: Mutex::new(None),
@@ -64,7 +67,7 @@ impl ManagedFramePool {
         let total = bytes
             .checked_mul(self.max_buffers)
             .ok_or(PoolError::Overflow)?;
-        let limits = PoolLimits::new(self.max_buffers, total)?;
+        let limits = PoolLimits::new(Some(self.max_buffers), Some(total))?;
         let mut current = self.current.lock().map_err(|_| PoolError::Poisoned)?;
         if current.as_ref().is_some_and(|pool| pool.bytes == bytes) {
             return Ok(());
@@ -271,7 +274,7 @@ mod tests {
 
     #[test]
     fn managed_preallocation_is_counted_even_if_statistics_arrive_after_configuration() {
-        let pool = ManagedFramePool::new(2).unwrap();
+        let pool = ManagedFramePool::new(Some(2), None).unwrap();
         pool.configure(4).unwrap();
         let stats = Arc::new(PipelineStatistics::new());
         pool.set_statistics(stats.clone());
@@ -286,7 +289,7 @@ mod tests {
     #[test]
     fn gst_memory_and_vyd_frame_share_bounded_lease_until_both_release_it() {
         gst::init().unwrap();
-        let pool = ManagedFramePool::new(1).unwrap();
+        let pool = ManagedFramePool::new(Some(1), None).unwrap();
         pool.configure(4).unwrap();
         let mut buffer = pool.acquire_buffer().unwrap();
         {
@@ -323,7 +326,7 @@ mod tests {
     #[test]
     fn custom_gst_buffer_pool_uses_vyd_manager() {
         gst::init().unwrap();
-        let managed = ManagedFramePool::new(2).unwrap();
+        let managed = ManagedFramePool::new(Some(2), None).unwrap();
         let gst_pool = VydGstBufferPool::new();
         gst_pool.set_managed_pool(managed.clone());
         let mut config = gst_pool.config();
@@ -347,7 +350,7 @@ mod tests {
     #[test]
     fn reconfiguration_keeps_old_frame_backing_alive_until_release() {
         gst::init().unwrap();
-        let pool = ManagedFramePool::new(1).unwrap();
+        let pool = ManagedFramePool::new(None, None).unwrap();
         pool.configure(4).unwrap();
         let old_manager = pool.manager().unwrap();
         let mut buffer = pool.acquire_buffer().unwrap();

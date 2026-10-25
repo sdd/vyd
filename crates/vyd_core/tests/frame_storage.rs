@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use vyd::frame::{CpuStorage, SharedVec};
-use vyd::statistics::{PipelineStatistics, StatsContext};
+use vyd_core::frame::{CpuStorage, SharedVec};
+use vyd_core::statistics::{PipelineStatistics, StatsContext};
 
 #[test]
 fn nontransferable_storage_makes_one_counted_copy() {

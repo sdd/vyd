@@ -1,12 +1,12 @@
 use std::num::NonZeroUsize;
-use vyd::frame::factory::FrameFactory;
-use vyd::frame::layout::{CpuLayout, FrameSpec};
-use vyd::frame::pool::{BufferPoolManager, PoolError, PoolLimits, WaitPolicy};
-use vyd::frame::{Frame, FrameError, Nv12Encoding, PixelFormat};
+use vyd_core::frame::factory::FrameFactory;
+use vyd_core::frame::layout::{CpuLayout, FrameSpec};
+use vyd_core::frame::pool::{BufferPoolManager, PoolError, PoolLimits, WaitPolicy};
+use vyd_core::frame::{Frame, FrameError, Nv12Encoding, PixelFormat};
 
 #[test]
 fn pooled_luma8_write_copies_for_clone_and_failed_acquisition_preserves_bytes() {
-    let pool = BufferPoolManager::new(PoolLimits::new(2, 128).unwrap());
+    let pool = BufferPoolManager::new(PoolLimits::new(Some(2), Some(128)).unwrap());
     let factory = FrameFactory::new(pool);
     let mut frame = factory.create_luma8(2, 2, WaitPolicy::Immediate).unwrap();
     frame
@@ -77,7 +77,9 @@ fn requested_nv12_rows_preserve_old_clone_and_publish_partial_write_on_drop() {
 
 #[test]
 fn nv12_pool_exhaustion_preserves_both_regions() {
-    let factory = FrameFactory::new(BufferPoolManager::new(PoolLimits::new(2, 128).unwrap()));
+    let factory = FrameFactory::new(BufferPoolManager::new(
+        PoolLimits::new(Some(2), Some(128)).unwrap(),
+    ));
     let layout = CpuLayout::row_aligned(
         FrameSpec::new(3, 3, PixelFormat::Nv12).unwrap(),
         NonZeroUsize::new(8).unwrap(),
@@ -132,10 +134,10 @@ mod gpu {
     use super::*;
     use std::sync::Arc;
     use std::time::Duration;
-    use vyd::gpu::pool::{GpuPoolError, GpuPoolLimits, GpuPoolManager};
-    use vyd::gpu::transfer::{GpuTransfer, GpuTransferError};
-    use vyd::gpu::{GpuContextError, WgpuContext, WgpuContextOptions};
-    use vyd::statistics::{PipelineStatistics, StatsContext};
+    use vyd_core::gpu::pool::{GpuPoolError, GpuPoolLimits, GpuPoolManager};
+    use vyd_core::gpu::transfer::{GpuTransfer, GpuTransferError};
+    use vyd_core::gpu::{GpuContextError, WgpuContext, WgpuContextOptions};
+    use vyd_core::statistics::{PipelineStatistics, StatsContext};
 
     fn fixture(resources: usize) -> Option<(GpuTransfer, GpuPoolManager, Arc<PipelineStatistics>)> {
         let context = match WgpuContext::request_blocking(WgpuContextOptions::default()) {

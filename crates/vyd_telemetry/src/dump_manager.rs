@@ -144,7 +144,7 @@ impl DumpManager {
     }
 
     /// Attach periodic flushing and finalization to a pipeline's lifecycle.
-    pub fn attach(self, ctx: &mut vyd::pipeline::PipelineContext) {
+    pub fn attach(self, ctx: &mut vyd_core::pipeline::PipelineContext) {
         ctx.put("dump_manager", self);
         ctx.add_observer(DumpObserver { frames: 0 });
     }
@@ -164,15 +164,15 @@ struct DumpObserver {
     frames: u64,
 }
 
-fn pipeline_error(error: impl std::fmt::Display) -> vyd::VydError {
-    vyd::VydError::GeneralPluginError(format!("telemetry: {error}"))
+fn pipeline_error(error: impl std::fmt::Display) -> vyd_core::VydError {
+    vyd_core::VydError::GeneralPluginError(format!("telemetry: {error}"))
 }
 
-impl vyd::pipeline::PipelineObserver for DumpObserver {
+impl vyd_core::pipeline::PipelineObserver for DumpObserver {
     fn pipeline_started(
         &mut self,
-        ctx: &mut vyd::pipeline::PipelineContext,
-    ) -> Result<(), vyd::VydError> {
+        ctx: &mut vyd_core::pipeline::PipelineContext,
+    ) -> Result<(), vyd_core::VydError> {
         self.frames = 0;
         ctx.try_get_as::<DumpManager>("dump_manager")?
             .write_metadata()
@@ -181,9 +181,9 @@ impl vyd::pipeline::PipelineObserver for DumpObserver {
 
     fn frame_processed(
         &mut self,
-        _frame: &vyd::FrameContext,
-        ctx: &mut vyd::pipeline::PipelineContext,
-    ) -> Result<(), vyd::VydError> {
+        _frame: &vyd_core::FrameContext,
+        ctx: &mut vyd_core::pipeline::PipelineContext,
+    ) -> Result<(), vyd_core::VydError> {
         self.frames += 1;
         if self.frames.is_multiple_of(100) {
             ctx.try_get_as_mut::<DumpManager>("dump_manager")?
@@ -195,10 +195,10 @@ impl vyd::pipeline::PipelineObserver for DumpObserver {
 
     fn pipeline_finished(
         &mut self,
-        ctx: &mut vyd::pipeline::PipelineContext,
-    ) -> Result<(), vyd::VydError> {
+        ctx: &mut vyd_core::pipeline::PipelineContext,
+    ) -> Result<(), vyd_core::VydError> {
         let snapshot = ctx
-            .try_get_as::<Arc<vyd::statistics::PipelineStatistics>>("pipeline_statistics")?
+            .try_get_as::<Arc<vyd_core::statistics::PipelineStatistics>>("pipeline_statistics")?
             .snapshot();
         let manager = ctx.try_get_as_mut::<DumpManager>("dump_manager")?;
         let closed = manager.close_all();

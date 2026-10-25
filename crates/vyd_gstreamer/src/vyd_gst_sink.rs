@@ -43,7 +43,7 @@ impl VydGstSink {
         *self.imp().managed_pool.lock().unwrap() = Some(pool);
     }
 
-    pub fn set_statistics(&self, stats: Arc<vyd::statistics::PipelineStatistics>) {
+    pub fn set_statistics(&self, stats: Arc<vyd_core::statistics::PipelineStatistics>) {
         if let Some(pool) = self.imp().managed_pool.lock().unwrap().as_ref() {
             pool.set_statistics(stats.clone());
         }
@@ -54,10 +54,10 @@ impl VydGstSink {
 mod imp {
     use super::*;
     use gst::glib::Cast;
-    use vyd::frame::layout::{CpuLayout, CpuPlaneLayout, FrameSpec};
-    use vyd::frame::PixelFormat;
-    use vyd::statistics::{MemoryOperation, PipelineStatistics};
-    use vyd::{Frame, FrameTiming};
+    use vyd_core::frame::layout::{CpuLayout, CpuPlaneLayout, FrameSpec};
+    use vyd_core::frame::PixelFormat;
+    use vyd_core::statistics::{MemoryOperation, PipelineStatistics};
+    use vyd_core::{Frame, FrameTiming};
 
     #[derive(Default)]
     pub struct VydGstSink {

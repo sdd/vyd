@@ -7,8 +7,8 @@ use std::path::PathBuf;
 #[command(version)]
 pub struct Config {
     /// Path to the configuration TOML file
-    #[arg(short, long, default_value = "examples/basic.toml")]
-    pub config: PathBuf,
+    #[arg(short, long = "config", default_value = "examples/basic.toml")]
+    pub config_path: PathBuf,
 }
 
 impl Config {

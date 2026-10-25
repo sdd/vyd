@@ -70,4 +70,4 @@ impl FrameProcessor for DummyProcessor {
     }
 }
 
-register_vyd_frame_processor!(DummyProcessor);
+register_vyd_frame_processor!(DummyProcessor, "vyd");

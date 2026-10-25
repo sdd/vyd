@@ -1,13 +1,13 @@
 use gst::prelude::*;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
-use vyd::caps::{
+use vyd_core::caps::{
     FrameFormatRelation, FrameMemory, FramePortSpec, FramePortSpecs, ProcessorPortSpecs,
 };
-use vyd::frame::PixelFormat;
-use vyd::pipeline::{Pipeline, PipelineContext, PipelineObserver, Stage};
-use vyd::statistics::{PipelineStatistics, ProcessingType};
-use vyd::{
+use vyd_core::frame::PixelFormat;
+use vyd_core::pipeline::{Pipeline, PipelineContext, PipelineObserver, Stage};
+use vyd_core::statistics::{PipelineStatistics, ProcessingType};
+use vyd_core::{
     Frame, FrameContext, FrameProcessor, FrameProcessorResult, FrameSink, FrameSource, FrameTiming,
     VydError,
 };
@@ -340,7 +340,7 @@ fn gst_matches_serial_pixels_metadata_skips_eos_and_counts_real_copies() {
     let expected_events = Events::default();
     let expected_frames = Frames::default();
     let (ctx, pipeline) = fixture(&expected_events, &expected_frames, "normal");
-    vyd::pipeline::run_pipeline(ctx, pipeline, None).unwrap();
+    vyd_core::pipeline::run_pipeline(ctx, pipeline, None).unwrap();
     let events = Events::default();
     let frames = Frames::default();
     let (ctx, pipeline) = fixture(&events, &frames, "normal");
@@ -411,7 +411,7 @@ fn gpu_only_processor_requires_a_configured_pipeline_context() {
 #[cfg(feature = "gpu-wgpu")]
 #[test]
 fn selected_gpu_segment_rejects_cpu_output_from_a_gpu_only_stage() {
-    use vyd::gpu::{WgpuContext, WgpuContextOptions};
+    use vyd_core::gpu::{WgpuContext, WgpuContextOptions};
 
     let events = Events::default();
     let frames = Frames::default();

@@ -2,13 +2,15 @@
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use vyd::caps::{FrameFormatRelation, FrameMemory, FramePortSpec, ProcessorPortSpecs};
-use vyd::frame::pool::WaitPolicy;
-use vyd::frame::{Frame, PixelFormat};
-use vyd::gpu::{GpuContextError, WgpuContext, WgpuContextOptions};
-use vyd::pipeline::{Pipeline, PipelineContext, PipelineObserver, Stage};
-use vyd::statistics::{PipelineStatistics, ProcessingType};
-use vyd::{FrameContext, FrameProcessor, FrameProcessorResult, FrameSink, FrameSource, VydError};
+use vyd_core::caps::{FrameFormatRelation, FrameMemory, FramePortSpec, ProcessorPortSpecs};
+use vyd_core::frame::pool::WaitPolicy;
+use vyd_core::frame::{Frame, PixelFormat};
+use vyd_core::gpu::{GpuContextError, WgpuContext, WgpuContextOptions};
+use vyd_core::pipeline::{Pipeline, PipelineContext, PipelineObserver, Stage};
+use vyd_core::statistics::{PipelineStatistics, ProcessingType};
+use vyd_core::{
+    FrameContext, FrameProcessor, FrameProcessorResult, FrameSink, FrameSource, VydError,
+};
 use vyd_gstreamer::runtime::{run_pipeline, run_pipeline_with_native_nodes, NativeNode};
 
 type Output = Arc<Mutex<Vec<(usize, Vec<u8>, String)>>>;

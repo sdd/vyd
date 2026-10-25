@@ -1,5 +1,5 @@
-use vyd::VydError;
-use vyd::pipeline::{PipelineConfig, PipelineContext, build_pipeline, run_pipeline};
+use vyd_core::VydError;
+use vyd_core::pipeline::{PipelineConfig, PipelineContext, build_pipeline, run_pipeline};
 
 #[test]
 fn unknown_stage_is_a_config_error() {

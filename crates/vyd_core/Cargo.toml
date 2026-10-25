@@ -1,0 +1,33 @@
+[package]
+name = "vyd-core"
+version = "0.1.0"
+edition = "2024"
+authors.workspace = true
+description = "Managed frames and composable video processing pipelines"
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+documentation = "https://docs.rs/vyd"
+
+[features]
+default = []
+gpu-wgpu = ["dep:wgpu", "dep:pollster"]
+
+[dependencies]
+chrono = { workspace = true }
+image = { workspace = true }
+inventory = "0.3"
+paste = "1"
+serde = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+dashmap = "6"
+thiserror = { workspace = true }
+wgpu = { version = "=24.0.5", optional = true }
+pollster = { version = "0.4", optional = true }
+
+[lib]
+name = "vyd_core"
+
+[dev-dependencies]
+serde_json = { workspace = true }

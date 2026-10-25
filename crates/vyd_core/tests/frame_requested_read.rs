@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use vyd::frame::factory::FrameFactory;
-use vyd::frame::pool::WaitPolicy;
-use vyd::frame::{CpuFrame, Frame, PixelFormat};
-use vyd::statistics::{PipelineStatistics, StatsContext};
+use vyd_core::frame::factory::FrameFactory;
+use vyd_core::frame::pool::WaitPolicy;
+use vyd_core::frame::{CpuFrame, Frame, PixelFormat};
+use vyd_core::statistics::{PipelineStatistics, StatsContext};
 
 #[test]
 fn cpu_requested_conversion_is_cached_until_legacy_mutation_or_replacement() {
@@ -70,10 +70,10 @@ fn cpu_requested_conversion_is_cached_until_legacy_mutation_or_replacement() {
 mod gpu_tests {
     use super::*;
     use std::time::Duration;
-    use vyd::frame::FrameError;
-    use vyd::gpu::pool::{GpuPoolLimits, GpuPoolManager};
-    use vyd::gpu::transfer::{GpuTransfer, GpuTransferError};
-    use vyd::gpu::{GpuContextError, WgpuContext, WgpuContextOptions};
+    use vyd_core::frame::FrameError;
+    use vyd_core::gpu::pool::{GpuPoolLimits, GpuPoolManager};
+    use vyd_core::gpu::transfer::{GpuTransfer, GpuTransferError};
+    use vyd_core::gpu::{GpuContextError, WgpuContext, WgpuContextOptions};
 
     fn fixture(limits: GpuPoolLimits) -> Option<(GpuTransfer, Arc<PipelineStatistics>)> {
         let context = match WgpuContext::request_blocking(WgpuContextOptions::default()) {

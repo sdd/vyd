@@ -1,7 +1,7 @@
-use vyd::frame::factory::FrameFactory;
-use vyd::frame::layout::{CpuLayout, CpuPlaneLayout, FrameSpec, LayoutError};
-use vyd::frame::pool::{BufferPoolManager, PoolError, PoolLimits, WaitPolicy};
-use vyd::frame::{CpuNv12Frame, CpuStorage, Frame, FrameError, Nv12Encoding, PixelFormat};
+use vyd_core::frame::factory::FrameFactory;
+use vyd_core::frame::layout::{CpuLayout, CpuPlaneLayout, FrameSpec, LayoutError};
+use vyd_core::frame::pool::{BufferPoolManager, PoolError, PoolLimits, WaitPolicy};
+use vyd_core::frame::{CpuNv12Frame, CpuStorage, Frame, FrameError, Nv12Encoding, PixelFormat};
 
 #[test]
 fn packed_odd_nv12_has_visible_y_and_uv_rows() {
@@ -115,7 +115,7 @@ fn encoding_is_explicit_and_invalid_imports_never_claim_full_range() {
 
 #[test]
 fn pooled_clone_write_is_bounded_and_keeps_retained_rows() {
-    let pool = BufferPoolManager::new(PoolLimits::new(1, 12).unwrap());
+    let pool = BufferPoolManager::new(PoolLimits::new(Some(1), Some(12)).unwrap());
     let factory = FrameFactory::new(pool.clone());
     let original = factory
         .create_nv12(2, 2, Nv12Encoding::FullRange, WaitPolicy::Immediate)
@@ -164,7 +164,7 @@ fn independent_factory_regions_are_pooled_and_released() {
         &[13, 10],
     )
     .unwrap();
-    let pool = BufferPoolManager::new(PoolLimits::new(2, 23).unwrap());
+    let pool = BufferPoolManager::new(PoolLimits::new(Some(2), Some(23)).unwrap());
     let factory = FrameFactory::new(pool.clone());
     let frame = factory
         .create_nv12_with_layout(layout, Nv12Encoding::FullRange, WaitPolicy::Immediate)
@@ -191,7 +191,7 @@ fn failed_second_region_acquisition_returns_first_lease() {
         &[13, 10],
     )
     .unwrap();
-    let pool = BufferPoolManager::new(PoolLimits::new(1, 23).unwrap());
+    let pool = BufferPoolManager::new(PoolLimits::new(Some(1), Some(23)).unwrap());
     let factory = FrameFactory::new(pool.clone());
     assert!(matches!(
         factory.create_nv12_with_layout(layout, Nv12Encoding::FullRange, WaitPolicy::Immediate),

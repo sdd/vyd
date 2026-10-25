@@ -1,5 +1,5 @@
 use std::sync::{Arc, Barrier};
-use vyd::pipeline::PipelineContext;
+use vyd_core::pipeline::PipelineContext;
 
 #[derive(Debug, PartialEq)]
 struct Model {
@@ -51,7 +51,7 @@ fn publication_across_workers_keeps_existing_snapshots_and_runs_isolated() {
 
 #[test]
 fn service_destructor_can_reenter_registry_after_replacement() {
-    struct Service(vyd::pipeline::PipelineServices);
+    struct Service(vyd_core::pipeline::PipelineServices);
     impl Drop for Service {
         fn drop(&mut self) {
             // This deadlocks if publish destroys the old value under its lock.

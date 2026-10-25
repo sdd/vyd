@@ -2,9 +2,6 @@
 
 mod config;
 
-use std::sync::Arc;
-
-use vyd::statistics::PipelineStatistics;
 // Link the built-in stages so inventory can register them for TOML configs.
 use vyd::stages as _;
 
@@ -24,8 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let config = Config::parse_args();
 
-    // Create shared statistics
-    let stats = Arc::new(PipelineStatistics::new());
+    let pipeline = vyd::PipelineBuilder::from_config_file(&config.config_path)?.build();
+    let stats = pipeline.statistics();
     let stats_for_signal = stats.clone();
 
     // Set up Ctrl+C handler
@@ -35,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .expect("Error setting Ctrl-C handler");
 
-    vyd_gstreamer::runtime::run_pipeline_with_config_file_path(&config.config, stats.clone())?;
+    pipeline.run()?;
 
     // If we reach here, the pipeline completed naturally
     stats.print_final_stats();

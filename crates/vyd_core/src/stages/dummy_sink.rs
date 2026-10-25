@@ -41,4 +41,4 @@ impl FrameSink for DummySink {
     }
 }
 
-register_vyd_frame_sink!(DummySink);
+register_vyd_frame_sink!(DummySink, "vyd");

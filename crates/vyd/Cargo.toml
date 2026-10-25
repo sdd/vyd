@@ -3,7 +3,7 @@ name = "vyd"
 version = "0.1.0"
 edition = "2024"
 authors.workspace = true
-description = "Managed frames and composable video processing pipelines"
+description = "Configured Vyd video pipelines with a GStreamer runtime"
 repository.workspace = true
 license.workspace = true
 readme.workspace = true
@@ -11,23 +11,13 @@ documentation = "https://docs.rs/vyd"
 
 [features]
 default = []
-gpu-wgpu = ["dep:wgpu", "dep:pollster"]
+gpu-wgpu = ["vyd-core/gpu-wgpu", "vyd-gstreamer/gpu-wgpu"]
 
 [dependencies]
-chrono = { workspace = true }
-image = { workspace = true }
-inventory = "0.3"
-paste = "1"
-serde = { workspace = true }
+vyd-core = { workspace = true }
+vyd-gstreamer = { path = "../vyd_gstreamer", version = "0.1.0" }
+vyd-telemetry = { path = "../vyd_telemetry", version = "0.1.0" }
 toml = { workspace = true }
-tracing = { workspace = true }
-dashmap = "6"
-thiserror = { workspace = true }
-wgpu = { version = "=24.0.5", optional = true }
-pollster = { version = "0.4", optional = true }
 
 [lib]
 name = "vyd"
-
-[dev-dependencies]
-serde_json = { workspace = true }

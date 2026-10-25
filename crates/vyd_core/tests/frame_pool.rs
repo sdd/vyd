@@ -1,11 +1,13 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
-use vyd::frame::pool::{BufferPoolManager, CpuPoolProvider, PoolError, PoolLimits, WaitPolicy};
-use vyd::statistics::{PipelineStatistics, StatsContext};
+use vyd_core::frame::pool::{
+    BufferPoolManager, CpuPoolProvider, PoolError, PoolLimits, WaitPolicy,
+};
+use vyd_core::statistics::{PipelineStatistics, StatsContext};
 
 fn make_pool(buffers: usize, bytes: usize) -> BufferPoolManager {
-    BufferPoolManager::new(PoolLimits::new(buffers, bytes).unwrap())
+    BufferPoolManager::new(PoolLimits::new(Some(buffers), Some(bytes)).unwrap())
 }
 
 #[test]
@@ -120,7 +122,10 @@ fn shared_write_detaches_within_pool_and_exhaustion_keeps_old_value() {
 
 #[test]
 fn byte_limit_idle_eviction_timeout_and_close_are_bounded() {
-    assert_eq!(PoolLimits::new(0, 1), Err(PoolError::InvalidLimits));
+    assert_eq!(
+        PoolLimits::new(Some(0), Some(1)),
+        Err(PoolError::InvalidLimits)
+    );
     let pool = make_pool(1, 8);
     pool.preallocate(4, 1).unwrap();
     assert_eq!(pool.preallocate(4, 1), Err(PoolError::Exhausted));
@@ -198,7 +203,10 @@ fn provider_failure_rolls_back_reservation_and_allows_retry() {
         fail_on: 2,
         manager: Mutex::new(None),
     });
-    let pool = BufferPoolManager::with_provider(PoolLimits::new(2, 8).unwrap(), provider.clone());
+    let pool = BufferPoolManager::with_provider(
+        PoolLimits::new(Some(2), Some(8)).unwrap(),
+        provider.clone(),
+    );
     *provider.manager.lock().unwrap() = Some(pool.clone());
     assert_eq!(pool.preallocate(4, 2), Err(PoolError::AllocationFailed));
     let snapshot = pool.snapshot().unwrap();
@@ -233,7 +241,10 @@ fn pending_growth_respects_limits_and_close_rejects_in_flight_allocation() {
         entered: Barrier::new(2),
         release: Barrier::new(2),
     });
-    let pool = BufferPoolManager::with_provider(PoolLimits::new(1, 4).unwrap(), provider.clone());
+    let pool = BufferPoolManager::with_provider(
+        PoolLimits::new(Some(1), Some(4)).unwrap(),
+        provider.clone(),
+    );
     let worker_pool = pool.clone();
     let worker = std::thread::spawn(move || worker_pool.try_acquire(4, WaitPolicy::Immediate));
     provider.entered.wait();

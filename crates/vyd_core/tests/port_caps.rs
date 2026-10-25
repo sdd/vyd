@@ -1,7 +1,7 @@
-use vyd::caps::{
+use vyd_core::caps::{
     FrameFormatRelation, FrameMemory, FramePortSpec, FramePortSpecs, ProcessorPortSpecs,
 };
-use vyd::frame::PixelFormat;
+use vyd_core::frame::PixelFormat;
 
 #[test]
 fn alternatives_and_processor_relations_are_nonempty_and_deduplicated() {

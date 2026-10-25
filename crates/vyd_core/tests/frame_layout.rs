@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
-use vyd::frame::PixelFormat;
-use vyd::frame::layout::{CpuLayout, CpuPlaneLayout, FrameSpec, LayoutError};
+use vyd_core::frame::PixelFormat;
+use vyd_core::frame::layout::{CpuLayout, CpuPlaneLayout, FrameSpec, LayoutError};
 
 #[test]
 fn padded_luma8_rows_accept_short_final_padding_but_never_expose_it_as_pixels() {
