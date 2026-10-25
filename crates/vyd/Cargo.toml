@@ -1,6 +1,6 @@
 [package]
 name = "vyd"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 authors.workspace = true
 description = "Configured Vyd video pipelines with a GStreamer runtime"
@@ -16,8 +16,8 @@ gpu-wgpu = ["vyd-core/gpu-wgpu", "vyd-gstreamer/gpu-wgpu"]
 [dependencies]
 parse-size = "1.1"
 vyd-core = { workspace = true }
-vyd-gstreamer = { path = "../vyd_gstreamer", version = "0.2.0" }
-vyd-telemetry = { path = "../vyd_telemetry", version = "0.2.0" }
+vyd-gstreamer = { path = "../vyd_gstreamer", version = "0.2.1" }
+vyd-telemetry = { path = "../vyd_telemetry", version = "0.2.1" }
 toml = { workspace = true }
 
 [lib]

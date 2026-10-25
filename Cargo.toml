@@ -10,7 +10,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Scott Donnelly"]
 description = "pluggable video processing pipeline"
 repository = "https://github.com/sdd/vyd"
@@ -21,8 +21,8 @@ readme = "README.md"
 debug = true
 
 [workspace.dependencies]
-vyd = { path = "./crates/vyd", version = "0.2.0" }
-vyd-core = { path = "./crates/vyd_core", version = "0.1.0" }
+vyd = { path = "./crates/vyd", version = "0.2.1" }
+vyd-core = { path = "./crates/vyd_core", version = "0.1.1" }
 
 anyhow = "1"
 chrono = { version = "0.4.40", features = ["serde"] }

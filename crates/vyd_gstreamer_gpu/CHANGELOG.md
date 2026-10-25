@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/sdd/vyd/compare/vyd-gstreamer-gpu/0.2.0...vyd-gstreamer-gpu/0.2.1) - 2026-10-25
+
+### Added
+
+- accept byte-size units for CPU pool limits
+- add ability to config cpu pool limits from toml
+
 ## [0.2.0](https://github.com/sdd/vyd/compare/vyd-gstreamer-gpu/0.1.0...vyd-gstreamer-gpu/0.2.0) - 2026-10-25
 
 ### Added
