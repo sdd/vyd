@@ -49,6 +49,16 @@ stats.print_final_stats();
 
 The `vyd-telemetry` crate still offers `DumpManager` for custom `Dumpable` stage data. Its observer flushes writers and writes `run_metadata.json` and `run_statistics.json`, including on pipeline errors. Direct users of `vyd-core` can keep constructing a `PipelineContext` and calling its serial runner without a GStreamer dependency.
 
+Pipelines that retain many CPU frames can set pool limits in the same TOML file:
+
+```toml
+[cpu_pool]
+max_buffers = 96
+max_bytes = 1610612736
+```
+
+Both fields are optional. The defaults are 32 buffers and 256 MiB. These values cap pooled allocation; they do not preallocate buffers. Choose limits based on the frames retained by your stages and the expected frame size.
+
 GStreamer sections can be given as strings through `PipelineBuilder::with_gstreamer_nodes(boundary, "identity")`, or configured in TOML:
 
 ```toml
