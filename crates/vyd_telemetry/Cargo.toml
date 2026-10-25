@@ -16,9 +16,9 @@ chrono = { workspace = true }
 parquet = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_arrow = { version = "0.13", features = ["arrow-56"] }
-arrow-schema = "56"
+serde_arrow = { version = "0.15", features = ["arrow-56"] }
+arrow-schema = "60"
 tracing = { workspace = true }
-rand = "0.8.5"
+rand = "0.10.3"
 
 toml = { workspace = true }
