@@ -6,3 +6,9 @@ stage_type = "vyd::DummyProcessor"
 
 [sink]
 stage_type = "vyd::DummySink"
+
+# Optional GStreamer chain after the source (boundary 0). The Vyd facade
+# parses and installs these nodes; callers do not construct NativeNode values.
+# [[gstreamer_nodes]]
+# boundary = 0
+# pipeline = "identity"

@@ -16,7 +16,7 @@ pub struct FrameFactory {
 
 impl Default for FrameFactory {
     fn default() -> Self {
-        let limits = PoolLimits::new(DEFAULT_MAX_BUFFERS, DEFAULT_MAX_BYTES)
+        let limits = PoolLimits::new(Some(DEFAULT_MAX_BUFFERS), Some(DEFAULT_MAX_BYTES))
             .expect("positive default frame pool limits");
         Self::new(BufferPoolManager::new(limits))
     }

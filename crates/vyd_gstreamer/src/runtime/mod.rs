@@ -16,14 +16,14 @@ use gst::prelude::*;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 #[cfg(feature = "gpu-wgpu")]
-use vyd::frame::pool::WaitPolicy;
+use vyd_core::frame::pool::WaitPolicy;
 #[cfg(feature = "gpu-wgpu")]
-use vyd::frame::{Frame, PixelFormat};
-use vyd::pipeline::{Pipeline, PipelineContext, PipelineSession};
-use vyd::statistics::PipelineStatistics;
+use vyd_core::frame::{Frame, PixelFormat};
+use vyd_core::pipeline::{Pipeline, PipelineContext, PipelineSession};
+use vyd_core::statistics::PipelineStatistics;
 #[cfg(feature = "gpu-wgpu")]
-use vyd::statistics::StatsContext;
-use vyd::{FrameProcessorResult, VydError};
+use vyd_core::statistics::StatsContext;
+use vyd_core::{FrameProcessorResult, VydError};
 
 #[derive(Clone, Debug)]
 pub struct RuntimeOptions {
@@ -116,7 +116,7 @@ impl RuntimeState {
         &mut self,
         start: usize,
         end: usize,
-        mut frame: vyd::FrameContext,
+        mut frame: vyd_core::FrameContext,
         started: Instant,
         info: &gst_video::VideoInfo,
     ) -> Result<Option<gst::Buffer>, VydError> {
@@ -180,8 +180,8 @@ impl RuntimeState {
     #[cfg(feature = "gpu-wgpu")]
     fn materialize_gray8(
         frame: &mut Frame,
-        factory: &vyd::frame::factory::FrameFactory,
-        transfer: &vyd::gpu::transfer::GpuTransfer,
+        factory: &vyd_core::frame::factory::FrameFactory,
+        transfer: &vyd_core::gpu::transfer::GpuTransfer,
         wait: WaitPolicy,
         stats: &Arc<PipelineStatistics>,
     ) -> Result<(), VydError> {
@@ -292,6 +292,17 @@ pub fn run_pipeline_with_native_nodes(
     )
 }
 
+/// Low-level adapter used by the `vyd::Pipeline` facade. Most callers should
+/// describe nodes through `vyd::PipelineBuilder` and call `pipeline.run()`.
+pub fn run_pipeline_with_gstreamer_nodes(
+    context: PipelineContext,
+    pipeline: Pipeline,
+    stats: Option<Arc<PipelineStatistics>>,
+    nodes: Vec<NativeNode>,
+) -> Result<PipelineContext, VydError> {
+    run_pipeline_with_native_nodes(context, pipeline, stats, nodes)
+}
+
 pub fn run_pipeline_with_native_nodes_and_options(
     context: PipelineContext,
     pipeline: Pipeline,
@@ -299,7 +310,8 @@ pub fn run_pipeline_with_native_nodes_and_options(
     nodes: Vec<NativeNode>,
     options: RuntimeOptions,
 ) -> Result<PipelineContext, VydError> {
-    gst::init().map_err(error)?;
+    crate::initialize_gstreamer_tracing().map_err(error)?;
+
     transport::register();
     let stats = stats.unwrap_or_else(|| Arc::new(PipelineStatistics::new()));
     let worker_stats = stats.clone();
@@ -519,7 +531,7 @@ pub fn run_pipeline_with_config_file_path(
     let config = toml::from_str(&std::fs::read_to_string(path)?)?;
     run_pipeline(
         PipelineContext::new(),
-        vyd::pipeline::build_pipeline(&config)?,
+        vyd_core::pipeline::build_pipeline(&config)?,
         Some(stats),
     )
 }

@@ -10,6 +10,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+const DEFAULT_MAX_BUFFERS: usize = 32;
+const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaitPolicy {
     Immediate,
@@ -23,7 +26,10 @@ pub struct PoolLimits {
 }
 
 impl PoolLimits {
-    pub fn new(max_buffers: usize, max_bytes: usize) -> Result<Self, PoolError> {
+    pub fn new(max_buffers: Option<usize>, max_bytes: Option<usize>) -> Result<Self, PoolError> {
+        let max_buffers = max_buffers.unwrap_or(DEFAULT_MAX_BUFFERS);
+        let max_bytes = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
+
         if max_buffers == 0 || max_bytes == 0 {
             return Err(PoolError::InvalidLimits);
         }

@@ -19,7 +19,8 @@ cargo test --workspace --all-features
 
 The workspace contains:
 
-- `vyd`: pipeline orchestration, lifecycle observers, stage interfaces, managed Luma8 and full-range NV12 CPU frames, optional wgpu frame access, and statistics.
+- `vyd-core`: pipeline orchestration, lifecycle observers, stage interfaces, managed Luma8 and full-range NV12 CPU frames, optional wgpu frame access, and statistics. It has no GStreamer or Parquet dependency.
+- `vyd`: application-facing builder and owned pipeline. It combines the core, GStreamer runtime, and optional telemetry setup.
 - `vyd-telemetry`: run metadata, statistics export, and Parquet dumping.
 - `vyd-gstreamer`: generic file and RTSP frame sources with pooled CPU buffers.
 - `vyd-gstreamer-gpu`: experimental GPU buffer path. Its current source still assumes 1920×1080 Luma8 frames.
@@ -34,9 +35,29 @@ guidelines behind Vyd.
 
 ## Run telemetry
 
-Applications can attach a `vyd_telemetry::DumpManager` to their `PipelineContext` before calling `run_pipeline`. Stages access that manager to dump application data implementing `Dumpable`. The telemetry observer periodically flushes writers, closes them when the run finishes, and writes `run_metadata.json` and `run_statistics.json`. Finalization also runs after initialization and observer errors.
+Applications can construct a run with `vyd::PipelineBuilder::from_config_file(path)`, optionally call `with_dump_dir(directory)`, then call `build()`. The returned `vyd::Pipeline` exposes `context_mut()` and a cloneable `statistics()` handle before `run()` consumes it. The builder configures a GPU when any configured processor has `gpu = true`; this temporary convention does not depend on processor names. A build without `gpu-wgpu` reports that feature as required.
 
-`vyd::pipeline::run_pipeline_with_config_file_path(path, stats)` runs a configuration without dumping. `vyd_telemetry::run_pipeline_with_config_file_path(path, stats, dump_dir)` adds the telemetry integration. The core `vyd` crate has no Arrow or Parquet dependencies.
+```rust,no_run
+let pipeline = vyd::PipelineBuilder::from_config_file("examples/basic.toml")?
+    .with_dump_dir("./dumps")?
+    .build();
+let stats = pipeline.statistics();
+pipeline.run()?;
+stats.print_final_stats();
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The `vyd-telemetry` crate still offers `DumpManager` for custom `Dumpable` stage data. Its observer flushes writers and writes `run_metadata.json` and `run_statistics.json`, including on pipeline errors. Direct users of `vyd-core` can keep constructing a `PipelineContext` and calling its serial runner without a GStreamer dependency.
+
+GStreamer sections can be given as strings through `PipelineBuilder::with_gstreamer_nodes(boundary, "identity")`, or configured in TOML:
+
+```toml
+[[gstreamer_nodes]]
+boundary = 0
+pipeline = "identity"
+```
+
+Boundary 0 follows the source; boundary 1 follows the first Rust processor. A section that strips frame context requires `bridge_capacity` and `correspondence = "one_to_one_ordered"`. A geometry change also requires `input_size`, `output_size`, and `annotation_policy = "drop_all"`; these declarations are checked against negotiated packed GRAY8 buffers. The bridge does not support dropping, duplicating, reordering, or aggregation. The old `[native_scale]` app-specific section is rejected with a migration error.
 
 ## Release automation
 

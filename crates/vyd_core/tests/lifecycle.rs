@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
-use vyd::pipeline::{Pipeline, PipelineContext, PipelineObserver, Stage, run_pipeline};
-use vyd::statistics::ProcessingType;
-use vyd::{
+use vyd_core::pipeline::{Pipeline, PipelineContext, PipelineObserver, Stage, run_pipeline};
+use vyd_core::statistics::ProcessingType;
+use vyd_core::{
     Frame, FrameContext, FrameProcessor, FrameProcessorResult, FrameSink, FrameSource, VydError,
 };
 

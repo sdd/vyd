@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use vyd::frame_metadata::TypedFrameMetadata;
-use vyd::{Frame, FrameContext};
+use vyd_core::frame_metadata::TypedFrameMetadata;
+use vyd_core::{Frame, FrameContext};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Label(&'static str);

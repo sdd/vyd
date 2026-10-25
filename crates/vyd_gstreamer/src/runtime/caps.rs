@@ -2,11 +2,11 @@
 //! actual intersection/acceptance when the graph links and streams.
 use super::error;
 use gst::prelude::*;
-use vyd::caps::{
+use vyd_core::caps::{
     FrameMemory, FramePortSpec, FramePortSpecs, PipelinePortDeclarations, ProcessorPortSpecs,
 };
-use vyd::frame::PixelFormat;
-use vyd::VydError;
+use vyd_core::frame::PixelFormat;
+use vyd_core::VydError;
 
 pub(super) fn negotiated_gray8(pad: &gst::Pad) -> Result<gst_video::VideoInfo, VydError> {
     let caps = pad
@@ -40,7 +40,7 @@ fn gray8_info(caps: &gst::CapsRef) -> Result<gst_video::VideoInfo, VydError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vyd::caps::FrameFormatRelation;
+    use vyd_core::caps::FrameFormatRelation;
 
     fn gpu(format: PixelFormat) -> FramePortSpec {
         FramePortSpec::new(format, FrameMemory::Wgpu)

@@ -300,6 +300,9 @@ inventory::collect!(&'static dyn StageFactory);
 
 #[macro_export]
 macro_rules! register_vyd_frame_source {
+    ($source_type:ty, $public_name:literal) => {
+        $crate::_register_vyd_stage_impl!($public_name, $source_type, FrameSource);
+    };
     ($source_type:ty) => {
         $crate::_register_vyd_stage_impl!(env!("CARGO_PKG_NAME"), $source_type, FrameSource);
     };
@@ -307,6 +310,9 @@ macro_rules! register_vyd_frame_source {
 
 #[macro_export]
 macro_rules! register_vyd_frame_processor {
+    ($processor_type:ty, $public_name:literal) => {
+        $crate::_register_vyd_stage_impl!($public_name, $processor_type, FrameProcessor);
+    };
     ($processor_type:ty) => {
         $crate::_register_vyd_stage_impl!(env!("CARGO_PKG_NAME"), $processor_type, FrameProcessor);
     };
@@ -314,6 +320,9 @@ macro_rules! register_vyd_frame_processor {
 
 #[macro_export]
 macro_rules! register_vyd_frame_sink {
+    ($sink_type:ty, $public_name:literal) => {
+        $crate::_register_vyd_stage_impl!($public_name, $sink_type, FrameSink);
+    };
     ($sink_type:ty) => {
         $crate::_register_vyd_stage_impl!(env!("CARGO_PKG_NAME"), $sink_type, FrameSink);
     };

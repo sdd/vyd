@@ -51,4 +51,4 @@ impl FrameSource for DummySource {
     }
 }
 
-register_vyd_frame_source!(DummySource);
+register_vyd_frame_source!(DummySource, "vyd");

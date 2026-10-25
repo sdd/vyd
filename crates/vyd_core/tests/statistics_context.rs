@@ -1,5 +1,5 @@
 use std::sync::{Arc, Barrier};
-use vyd::statistics::{MemoryOperation, PipelineStatistics, StatsContext};
+use vyd_core::statistics::{MemoryOperation, PipelineStatistics, StatsContext};
 
 #[test]
 fn worker_contexts_keep_concurrent_runs_separate() {
@@ -75,9 +75,9 @@ fn nesting_and_unwinding_restore_run_and_stage_without_holding_borrows() {
 
 #[test]
 fn concurrent_pipeline_runners_attribute_frames_and_finalizers_to_their_own_run() {
-    use vyd::pipeline::{Pipeline, PipelineContext, Stage, run_pipeline};
-    use vyd::statistics::ProcessingType;
-    use vyd::{FrameContext, FrameSource, VydError};
+    use vyd_core::pipeline::{Pipeline, PipelineContext, Stage, run_pipeline};
+    use vyd_core::statistics::ProcessingType;
+    use vyd_core::{FrameContext, FrameSource, VydError};
 
     struct Source {
         barrier: Arc<Barrier>,
@@ -96,7 +96,7 @@ fn concurrent_pipeline_runners_attribute_frames_and_finalizers_to_their_own_run(
             StatsContext::record_memory_operation(MemoryOperation::CpuCopy(self.bytes));
             self.barrier.wait();
             Some(FrameContext::new(
-                vyd::Frame::from_raw(1, 1, vec![0]).unwrap(),
+                vyd_core::Frame::from_raw(1, 1, vec![0]).unwrap(),
                 0,
             ))
         }
@@ -128,7 +128,8 @@ fn concurrent_pipeline_runners_attribute_frames_and_finalizers_to_their_own_run(
             "#,
                 )
                 .unwrap();
-                let Pipeline { stages, sink, .. } = vyd::pipeline::build_pipeline(&config).unwrap();
+                let Pipeline { stages, sink, .. } =
+                    vyd_core::pipeline::build_pipeline(&config).unwrap();
                 let pipeline = Pipeline {
                     source: Stage::new(
                         Box::new(Source {

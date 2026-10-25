@@ -24,6 +24,8 @@ pub(crate) struct Config {
     pub(crate) input: InputConfig,
     pub(crate) buffer_pool_slot_count: usize,
     pub(crate) zc_enabled: bool,
+    pub(crate) max_frame_buffers: Option<usize>,
+    pub(crate) max_frame_buffer_bytes: Option<usize>,
 }
 
 impl TryFrom<&Value> for Config {
@@ -54,6 +56,15 @@ impl TryFrom<&Value> for Config {
             } else {
                 16
             };
+
+        let max_frame_buffers = table
+            .get("max_frame_buffers")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize);
+        let max_frame_buffer_bytes = table
+            .get("max_frame_buffer_bytes")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize);
 
         let rtsp_url = table.get("rtsp_url");
         let file_path = table.get("file_path");
@@ -101,6 +112,8 @@ impl TryFrom<&Value> for Config {
             input,
             buffer_pool_slot_count,
             zc_enabled,
+            max_frame_buffers,
+            max_frame_buffer_bytes,
         })
     }
 }

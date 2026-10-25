@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
-use vyd::{Frame, FrameTiming};
+use vyd_core::{Frame, FrameTiming};
 
 #[allow(dead_code)]
 pub struct FrameInfo {

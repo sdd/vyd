@@ -3,7 +3,7 @@ use super::{bridge, error, Shared};
 use gst::glib::{self, prelude::*, value::ToValue};
 use gst::prelude::*;
 use std::sync::Arc;
-use vyd::VydError;
+use vyd_core::VydError;
 
 use super::transport::NativeFrameAnnotations;
 

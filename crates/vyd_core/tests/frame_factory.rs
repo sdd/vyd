@@ -1,16 +1,16 @@
 use std::sync::Arc;
 use std::time::Duration;
-use vyd::Frame;
-use vyd::frame::CpuAllocationOrigin;
-use vyd::frame::FrameError;
-use vyd::frame::factory::FrameFactory;
-use vyd::frame::pool::{BufferPoolManager, PoolError, PoolLimits, WaitPolicy};
-use vyd::pipeline::PipelineContext;
-use vyd::statistics::{PipelineStatistics, StatsContext};
+use vyd_core::Frame;
+use vyd_core::frame::CpuAllocationOrigin;
+use vyd_core::frame::FrameError;
+use vyd_core::frame::factory::FrameFactory;
+use vyd_core::frame::pool::{BufferPoolManager, PoolError, PoolLimits, WaitPolicy};
+use vyd_core::pipeline::PipelineContext;
+use vyd_core::statistics::{PipelineStatistics, StatsContext};
 
 #[test]
 fn context_factory_creates_normal_frames_with_bounded_pool_lifetime() {
-    let pool = BufferPoolManager::new(PoolLimits::new(1, 4).unwrap());
+    let pool = BufferPoolManager::new(PoolLimits::new(Some(1), Some(4)).unwrap());
     let mut context = PipelineContext::new();
     context.set_frame_factory(FrameFactory::new(pool.clone()));
     let frame = context
@@ -40,7 +40,7 @@ fn context_factory_creates_normal_frames_with_bounded_pool_lifetime() {
 
 #[test]
 fn failed_fill_returns_lease_and_legacy_mutation_detaches() {
-    let pool = BufferPoolManager::new(PoolLimits::new(1, 4).unwrap());
+    let pool = BufferPoolManager::new(PoolLimits::new(Some(1), Some(4)).unwrap());
     let factory = FrameFactory::new(pool.clone());
     let result = factory.create_luma8_with(2, 2, WaitPolicy::Immediate, |_| {
         Err(FrameError::BufferUnavailable)
@@ -68,7 +68,7 @@ fn failed_fill_returns_lease_and_legacy_mutation_detaches() {
 
 #[test]
 fn malformed_dimensions_fail_before_pool_acquisition() {
-    let pool = BufferPoolManager::new(PoolLimits::new(1, 4).unwrap());
+    let pool = BufferPoolManager::new(PoolLimits::new(Some(1), Some(4)).unwrap());
     let factory = FrameFactory::new(pool.clone());
     assert!(matches!(
         factory.create_luma8(0, 1, WaitPolicy::Immediate),
@@ -87,7 +87,7 @@ fn malformed_dimensions_fail_before_pool_acquisition() {
 
 #[test]
 fn pooled_frame_write_keeps_backing_in_issuing_pool_and_isolates_clones() {
-    let pool = BufferPoolManager::new(PoolLimits::new(2, 8).unwrap());
+    let pool = BufferPoolManager::new(PoolLimits::new(Some(2), Some(8)).unwrap());
     let factory = FrameFactory::new(pool.clone());
     let original = factory
         .create_luma8_with(2, 2, WaitPolicy::Immediate, |bytes| {
@@ -110,7 +110,7 @@ fn pooled_frame_write_keeps_backing_in_issuing_pool_and_isolates_clones() {
 
 #[test]
 fn pooled_frame_write_exhaustion_preserves_frame_and_unique_write_reuses_lease() {
-    let pool = BufferPoolManager::new(PoolLimits::new(1, 4).unwrap());
+    let pool = BufferPoolManager::new(PoolLimits::new(Some(1), Some(4)).unwrap());
     let factory = FrameFactory::new(pool.clone());
     let mut frame = factory.create_luma8(2, 2, WaitPolicy::Immediate).unwrap();
     let retained = frame.clone();
@@ -155,7 +155,7 @@ fn pooled_write_restores_image_after_panic_and_rejects_other_storage() {
 
 #[test]
 fn fallible_reads_and_writes_keep_pool_provenance_and_isolate_retained_views() {
-    let pool = BufferPoolManager::new(PoolLimits::new(2, 8).unwrap());
+    let pool = BufferPoolManager::new(PoolLimits::new(Some(2), Some(8)).unwrap());
     let factory = FrameFactory::new(pool.clone());
     let mut frame = factory
         .create_luma8_with(2, 2, WaitPolicy::Immediate, |bytes| {
@@ -190,7 +190,7 @@ fn fallible_reads_and_writes_keep_pool_provenance_and_isolate_retained_views() {
 
 #[test]
 fn fallible_write_exhaustion_and_timeout_preserve_original_bytes() {
-    let pool = BufferPoolManager::new(PoolLimits::new(1, 4).unwrap());
+    let pool = BufferPoolManager::new(PoolLimits::new(Some(1), Some(4)).unwrap());
     let factory = FrameFactory::new(pool.clone());
     let mut frame = factory
         .create_luma8_with(2, 2, WaitPolicy::Immediate, |bytes| {

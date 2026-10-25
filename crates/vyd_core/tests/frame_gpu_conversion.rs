@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use vyd::frame::factory::FrameFactory;
-use vyd::frame::pool::WaitPolicy;
-use vyd::frame::{Frame, Nv12Encoding, PixelFormat};
-use vyd::gpu::pool::{GpuPoolLimits, GpuPoolManager};
-use vyd::gpu::submission::GpuSubmissionError;
-use vyd::gpu::transfer::{GpuTransfer, GpuTransferError};
-use vyd::gpu::{GpuContextError, WgpuContext, WgpuContextOptions};
-use vyd::statistics::{FrameOperationSnapshot, PipelineStatistics, StatsContext};
+use vyd_core::frame::factory::FrameFactory;
+use vyd_core::frame::pool::WaitPolicy;
+use vyd_core::frame::{Frame, Nv12Encoding, PixelFormat};
+use vyd_core::gpu::pool::{GpuPoolLimits, GpuPoolManager};
+use vyd_core::gpu::submission::GpuSubmissionError;
+use vyd_core::gpu::transfer::{GpuTransfer, GpuTransferError};
+use vyd_core::gpu::{GpuContextError, WgpuContext, WgpuContextOptions};
+use vyd_core::statistics::{FrameOperationSnapshot, PipelineStatistics, StatsContext};
 
 fn fixture(resources: usize) -> Option<(GpuTransfer, Arc<PipelineStatistics>)> {
     let context = match WgpuContext::request_blocking(WgpuContextOptions::default()) {
@@ -187,9 +187,9 @@ fn exhausted_destination_counts_failed_conversion_without_completed_bytes() {
             PixelFormat::Nv12,
             WaitPolicy::Immediate
         ),
-        Err(vyd::frame::FrameError::GpuTransfer(GpuTransferError::Pool(
-            _
-        )))
+        Err(vyd_core::frame::FrameError::GpuTransfer(
+            GpuTransferError::Pool(_)
+        ))
     ));
     let op = operation(&stats, "convert_gpu_luma8_to_nv12");
     assert_eq!(
@@ -222,7 +222,7 @@ fn immediate_caller_can_retry_pending_conversion_without_duplicate_work() {
     assert!(matches!(
         first,
         Ok(_)
-            | Err(vyd::frame::FrameError::GpuSubmission(
+            | Err(vyd_core::frame::FrameError::GpuSubmission(
                 GpuSubmissionError::WouldBlock
             ))
     ));

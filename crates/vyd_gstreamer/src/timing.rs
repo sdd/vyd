@@ -1,4 +1,4 @@
-use vyd::statistics::PipelineStatistics;
+use vyd_core::statistics::PipelineStatistics;
 
 /// Record element latency events produced by the GStreamer source.
 pub fn record_gst_timing_data(stats: &PipelineStatistics, timing_data: &[(u64, String)]) {

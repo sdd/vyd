@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use vyd::frame::factory::FrameFactory;
-use vyd::frame::layout::{CpuLayout, CpuPlaneLayout, FrameSpec};
-use vyd::frame::pool::{BufferPoolManager, PoolError, PoolLimits, WaitPolicy};
-use vyd::frame::{CpuNv12Frame, CpuStorage, Frame, FrameError, Nv12Encoding, PixelFormat};
-use vyd::statistics::{PipelineStatistics, StatsContext};
+use vyd_core::frame::factory::FrameFactory;
+use vyd_core::frame::layout::{CpuLayout, CpuPlaneLayout, FrameSpec};
+use vyd_core::frame::pool::{BufferPoolManager, PoolError, PoolLimits, WaitPolicy};
+use vyd_core::frame::{CpuNv12Frame, CpuStorage, Frame, FrameError, Nv12Encoding, PixelFormat};
+use vyd_core::statistics::{PipelineStatistics, StatsContext};
 
 #[test]
 fn even_luma8_to_nv12_copies_y_and_neutralizes_every_uv_byte() {
@@ -129,7 +129,7 @@ fn invalid_encoding_and_failed_allocation_count_attempts_without_completed_bytes
         .for_stage("failures")
         .enter();
     let source = Frame::from_raw(3, 3, vec![3; 9]).unwrap();
-    let pool = BufferPoolManager::new(PoolLimits::new(1, 17).unwrap());
+    let pool = BufferPoolManager::new(PoolLimits::new(Some(1), Some(17)).unwrap());
     let factory = FrameFactory::new(pool);
     let _held = factory.create_luma8(1, 1, WaitPolicy::Immediate).unwrap();
     for encoding in [Nv12Encoding::Unknown, Nv12Encoding::LimitedRange] {

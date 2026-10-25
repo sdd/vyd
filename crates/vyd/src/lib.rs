@@ -1,98 +1,119 @@
-#![cfg_attr(feature = "gpu-wgpu", recursion_limit = "256")]
+//! Application-facing Vyd pipeline builder and the core frame/stage API.
+pub use vyd_core::*;
 
-use std::any::Any;
-use std::collections::HashMap;
-use std::time::Duration;
+use std::path::Path;
+use std::sync::Arc;
+use vyd_core::pipeline::{Pipeline as StagePipeline, PipelineContext};
+use vyd_core::statistics::PipelineStatistics;
+use vyd_gstreamer::runtime::NativeNode;
 
-pub mod annotations;
-pub mod caps;
-pub mod error;
-pub mod frame;
-pub mod frame_metadata;
-#[cfg(feature = "gpu-wgpu")]
-pub mod gpu;
-pub mod pipeline;
-pub mod stages;
-pub mod statistics;
-pub mod traits;
-
-pub use error::VydError;
-pub use frame::Frame;
-pub use traits::{FrameProcessor, FrameSink, FrameSource, StageFactory};
-
-// needed for the exported macros to work without the consuming crate having to import them
-pub use inventory;
-pub use paste;
-pub use toml;
-
-/// Source media time for a frame, independent of stage processing time.
-/// Missing fields mean the source did not supply that timestamp. The values
-/// travel with the frame's identity through the supported linear graph.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct FrameTiming {
-    pub presentation_timestamp: Option<Duration>,
-    pub decode_timestamp: Option<Duration>,
-    pub duration: Option<Duration>,
+/// Builds a configured serial GStreamer pipeline and owns all run state.
+pub struct PipelineBuilder {
+    raw_config: String,
+    config: toml::Value,
+    context: PipelineContext,
+    stages: StagePipeline,
+    statistics: Arc<PipelineStatistics>,
+    nodes: Vec<NativeNode>,
 }
 
-pub struct FrameContext {
-    pub metadata: HashMap<String, Box<dyn Any + Send + Sync>>,
-    pub typed_metadata: frame_metadata::TypedFrameMetadata,
-    pub frame: Frame,
-    /// Source-assigned identity in the supported linear stream. Stages must
-    /// preserve it when replacing pixels; skips may leave gaps.
-    pub frame_index: usize,
-    pub timing: FrameTiming,
-}
+impl PipelineBuilder {
+    pub fn from_config_file(path: impl AsRef<Path>) -> Result<Self, VydError> {
+        let raw_config = std::fs::read_to_string(path)?;
+        let config: toml::Value = toml::from_str(&raw_config)?;
+        if config.get("native_scale").is_some() {
+            return Err(VydError::GeneralPluginError(
+                "[native_scale] is obsolete; describe the section with [[gstreamer_nodes]] and explicit geometry and annotation_policy".into(),
+            ));
+        }
+        let stages: vyd_core::pipeline::PipelineConfig = toml::from_str(&raw_config)?;
+        let nodes = vyd_gstreamer::pipeline_config::nodes_from_config(&config)?;
+        let mut context = PipelineContext::new();
+        vyd_gstreamer::pipeline_config::configure_gpu(&config, &mut context)?;
+        Ok(Self {
+            raw_config,
+            config,
+            context,
+            stages: vyd_core::pipeline::build_pipeline(&stages)?,
+            statistics: Arc::new(PipelineStatistics::new()),
+            nodes,
+        })
+    }
 
-impl FrameContext {
-    pub fn new(frame: Frame, frame_index: usize) -> Self {
-        Self {
-            metadata: HashMap::new(),
-            typed_metadata: frame_metadata::TypedFrameMetadata::new(),
-            frame,
-            frame_index,
-            timing: FrameTiming::default(),
+    /// Insert a GStreamer chain after the source (boundary 0) or after the
+    /// processor at index `boundary - 1`. For filters that change geometry or
+    /// strip context, use `[[gstreamer_nodes]]` with explicit contracts.
+    pub fn with_gstreamer_nodes(
+        mut self,
+        boundary: usize,
+        pipeline_description: impl Into<String>,
+    ) -> Self {
+        self.nodes
+            .push(NativeNode::description(boundary, pipeline_description));
+        self
+    }
+
+    pub fn with_dump_dir(mut self, directory: impl AsRef<Path>) -> Result<Self, VydError> {
+        let manager = vyd_telemetry::DumpManager::new(directory).map_err(|error| {
+            VydError::GeneralPluginError(format!("telemetry setup failed: {error}"))
+        })?;
+        let manager = manager.with_config(self.raw_config.clone());
+        let source = self
+            .config
+            .get("source")
+            .and_then(|source| source.get("stage_type"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned);
+        let manager = if let Some(source) = source {
+            manager.with_source(source)
+        } else {
+            manager
+        };
+        manager.attach(&mut self.context);
+        Ok(self)
+    }
+
+    pub fn context_mut(&mut self) -> &mut PipelineContext {
+        &mut self.context
+    }
+
+    pub fn statistics(&self) -> Arc<PipelineStatistics> {
+        self.statistics.clone()
+    }
+
+    pub fn build(self) -> Pipeline {
+        Pipeline {
+            context: self.context,
+            stages: self.stages,
+            statistics: self.statistics,
+            nodes: self.nodes,
         }
     }
-
-    pub fn try_get_as<'a, T: 'static>(&'a self, key: &str) -> Result<&'a T, VydError> {
-        let Some(value) = self.metadata.get(key) else {
-            tracing::trace!("key \"{}\" not present in frame context metadata", key);
-            return Err(VydError::FrameMetadataNotFoundError);
-        };
-
-        let Some(downcasted) = value.downcast_ref::<T>() else {
-            tracing::error!(
-                "Could not downcast metadata value to requested type {}",
-                core::any::type_name::<T>()
-            );
-            return Err(VydError::FrameMetadataTypeError);
-        };
-
-        Ok(downcasted)
-    }
-
-    pub fn get_as<'a, T: 'static>(&'a self, key: &str) -> &'a T {
-        self.try_get_as(key).unwrap()
-    }
-
-    pub fn put<T: Any + Send + Sync + 'static>(&mut self, key: &str, value: T) {
-        self.metadata.insert(key.to_string(), Box::new(value));
-    }
-
-    /// Store an immutable annotation. A value must not own this context's
-    /// attached pixel buffer when transported through GST.
-    pub fn put_typed<T: Any + Send + Sync>(&mut self, value: T) {
-        self.typed_metadata.insert(value);
-    }
-
-    pub fn get_typed<T: Any + Send + Sync>(&self) -> Option<&T> {
-        self.typed_metadata.get::<T>()
-    }
 }
 
-pub enum FrameProcessorResult {
-    Continue,
-    Skip,
+/// An owned run; its context and statistics can be accessed before `run`.
+pub struct Pipeline {
+    context: PipelineContext,
+    stages: StagePipeline,
+    statistics: Arc<PipelineStatistics>,
+    nodes: Vec<NativeNode>,
+}
+
+impl Pipeline {
+    pub fn context_mut(&mut self) -> &mut PipelineContext {
+        &mut self.context
+    }
+
+    pub fn statistics(&self) -> Arc<PipelineStatistics> {
+        self.statistics.clone()
+    }
+
+    pub fn run(self) -> Result<PipelineContext, VydError> {
+        vyd_gstreamer::runtime::run_pipeline_with_gstreamer_nodes(
+            self.context,
+            self.stages,
+            Some(self.statistics),
+            self.nodes,
+        )
+    }
 }

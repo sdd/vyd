@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use toml::Value;
-use vyd::pipeline::{PipelineConfig, PipelineContext, build_pipeline, run_pipeline};
-use vyd::{VydError, register_vyd_frame_processor};
+use vyd_core::pipeline::{PipelineConfig, PipelineContext, build_pipeline, run_pipeline};
+use vyd_core::{VydError, register_vyd_frame_processor};
 use vyd_telemetry::{DumpManager, Dumpable};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -43,12 +43,12 @@ impl DumpTestProcessor {
     }
 }
 
-impl vyd::traits::FrameProcessor for DumpTestProcessor {
+impl vyd_core::traits::FrameProcessor for DumpTestProcessor {
     fn process(
         &mut self,
-        frame_ctx: &mut vyd::FrameContext,
+        frame_ctx: &mut vyd_core::FrameContext,
         pipeline_ctx: &mut PipelineContext,
-    ) -> vyd::FrameProcessorResult {
+    ) -> vyd_core::FrameProcessorResult {
         // Create some test data
         let test_data = TestData {
             value: frame_ctx.frame_index as i32 * 10,
@@ -74,15 +74,15 @@ impl vyd::traits::FrameProcessor for DumpTestProcessor {
             }
         }
 
-        vyd::FrameProcessorResult::Continue
+        vyd_core::FrameProcessorResult::Continue
     }
 
     fn name(&self) -> &str {
         "dump_test_processor"
     }
 
-    fn processing_type(&self) -> vyd::statistics::ProcessingType {
-        vyd::statistics::ProcessingType::Cpu
+    fn processing_type(&self) -> vyd_core::statistics::ProcessingType {
+        vyd_core::statistics::ProcessingType::Cpu
     }
 }
 
@@ -207,19 +207,19 @@ stage_type = "vyd::DummySink"
 #[test]
 fn processor_error_closes_dump_and_exports_statistics() {
     struct FailingProcessor;
-    impl vyd::FrameProcessor for FailingProcessor {
+    impl vyd_core::FrameProcessor for FailingProcessor {
         fn process(
             &mut self,
-            _: &mut vyd::FrameContext,
+            _: &mut vyd_core::FrameContext,
             _: &mut PipelineContext,
-        ) -> vyd::FrameProcessorResult {
+        ) -> vyd_core::FrameProcessorResult {
             panic!("runtime must call the fallible hook");
         }
         fn try_process(
             &mut self,
-            frame: &mut vyd::FrameContext,
+            frame: &mut vyd_core::FrameContext,
             ctx: &mut PipelineContext,
-        ) -> Result<vyd::FrameProcessorResult, VydError> {
+        ) -> Result<vyd_core::FrameProcessorResult, VydError> {
             DumpTestProcessor.process(frame, ctx);
             Err(VydError::GeneralPluginError(
                 "processing failed after dump".into(),
@@ -228,8 +228,8 @@ fn processor_error_closes_dump_and_exports_statistics() {
         fn name(&self) -> &str {
             "failing"
         }
-        fn processing_type(&self) -> vyd::statistics::ProcessingType {
-            vyd::statistics::ProcessingType::Cpu
+        fn processing_type(&self) -> vyd_core::statistics::ProcessingType {
+            vyd_core::statistics::ProcessingType::Cpu
         }
     }
     let directory = std::env::temp_dir().join(format!("vyd_failed_dump_{}", rand::random::<u64>()));
@@ -247,7 +247,7 @@ fn processor_error_closes_dump_and_exports_statistics() {
     )
     .unwrap();
     let mut pipeline = build_pipeline(&config).unwrap();
-    pipeline.stages.push(vyd::pipeline::Stage::new(
+    pipeline.stages.push(vyd_core::pipeline::Stage::new(
         Box::new(FailingProcessor),
         "failing",
     ));

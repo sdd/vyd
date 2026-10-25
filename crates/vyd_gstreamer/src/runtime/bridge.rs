@@ -8,7 +8,7 @@ use super::{
 use gst::prelude::*;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use vyd::VydError;
+use vyd_core::VydError;
 
 struct BridgeState {
     pending: VecDeque<(u64, transport::ContextData)>,
@@ -397,8 +397,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
-    use vyd::statistics::PipelineStatistics;
-    use vyd::{Frame, FrameContext};
+    use vyd_core::statistics::PipelineStatistics;
+    use vyd_core::{Frame, FrameContext};
 
     struct DropWitness(Arc<AtomicUsize>);
     impl Drop for DropWitness {

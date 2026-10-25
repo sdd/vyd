@@ -2,8 +2,8 @@ use bytes::{Bytes, BytesMut};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use tracing;
-use vyd::frame::{CpuStorageShared, FrameError};
-use vyd::Frame;
+use vyd_core::frame::{CpuStorageShared, FrameError};
+use vyd_core::Frame;
 
 /// A frame buffer that owns memory from the pool and implements CpuStorageShared
 pub struct FrameBuffer {
@@ -916,7 +916,7 @@ mod tests {
 
     #[test]
     fn pooled_frame_cow_counts_one_copy_and_returns_backing_after_last_clone() {
-        use vyd::statistics::{PipelineStatistics, StatsContext};
+        use vyd_core::statistics::{PipelineStatistics, StatsContext};
         let mut pool = FrameBufferPool::new(4, 1);
         let pointer = pool.alloc().unwrap().as_ptr();
         let mut frame = pool.acquire_frame_from_ptr(pointer, 2, 2).unwrap();

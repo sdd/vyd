@@ -8,11 +8,11 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
-use vyd::frame::layout::{CpuLayout, CpuPlaneLayout, FrameSpec};
-use vyd::frame::{CpuFrame, CpuStorageShared};
-use vyd::frame_metadata::TypedFrameMetadata;
-use vyd::statistics::{MemoryOperation, PipelineStatistics};
-use vyd::{Frame, FrameContext, FrameTiming, VydError};
+use vyd_core::frame::layout::{CpuLayout, CpuPlaneLayout, FrameSpec};
+use vyd_core::frame::{CpuFrame, CpuStorageShared};
+use vyd_core::frame_metadata::TypedFrameMetadata;
+use vyd_core::statistics::{MemoryOperation, PipelineStatistics};
+use vyd_core::{Frame, FrameContext, FrameTiming, VydError};
 
 const META: &str = "VydSerialFrameContextMeta";
 
@@ -32,6 +32,11 @@ pub struct NativeFrameAnnotations<'a> {
 }
 
 impl NativeFrameAnnotations<'_> {
+    /// Discard annotations tied to the input image when geometry changes.
+    pub fn clear(&mut self) {
+        self.metadata.clear();
+        *self.typed = TypedFrameMetadata::new();
+    }
     pub fn get_typed<T: Any + Send + Sync>(&self) -> Option<&T> {
         self.typed.get::<T>()
     }
@@ -162,7 +167,7 @@ pub(super) fn info(frame: &Frame) -> Result<gst_video::VideoInfo, VydError> {
         return Err(error("serial GST adapter requires a CPU Luma8 frame"));
     };
     let (width, height) = cpu.img.dimensions();
-    let spec = FrameSpec::new(width, height, vyd::frame::PixelFormat::Luma8).map_err(error)?;
+    let spec = FrameSpec::new(width, height, vyd_core::frame::PixelFormat::Luma8).map_err(error)?;
     let size = CpuLayout::packed(spec).map_err(error)?.region_lengths()[0];
     if width > i32::MAX as u32 || height > i32::MAX as u32 || cpu.img.as_raw().len() != size {
         return Err(error("invalid packed Luma8 frame layout"));
@@ -418,8 +423,12 @@ fn copy_pixels(
 }
 
 fn video_layout(info: &gst_video::VideoInfo) -> Result<CpuLayout, VydError> {
-    let spec = FrameSpec::new(info.width(), info.height(), vyd::frame::PixelFormat::Luma8)
-        .map_err(error)?;
+    let spec = FrameSpec::new(
+        info.width(),
+        info.height(),
+        vyd_core::frame::PixelFormat::Luma8,
+    )
+    .map_err(error)?;
     let stride = usize::try_from(info.stride()[0])
         .map_err(|_| error("GST Luma8 row stride must be positive"))?;
     CpuLayout::new(
@@ -434,8 +443,8 @@ fn video_layout(info: &gst_video::VideoInfo) -> Result<CpuLayout, VydError> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use vyd::frame::factory::FrameFactory;
-    use vyd::frame::pool::{BufferPoolManager, PoolLimits, WaitPolicy};
+    use vyd_core::frame::factory::FrameFactory;
+    use vyd_core::frame::pool::{BufferPoolManager, PoolLimits, WaitPolicy};
 
     struct DropValue(Arc<AtomicUsize>);
 
@@ -577,7 +586,7 @@ mod tests {
     fn packed_gst_map_keeps_issuing_pool_lease_alive_and_reads_actual_pixels() {
         gst::init().unwrap();
         register();
-        let pool = BufferPoolManager::new(PoolLimits::new(1, 8).unwrap());
+        let pool = BufferPoolManager::new(PoolLimits::new(Some(1), Some(8)).unwrap());
         let factory = FrameFactory::new(pool.clone());
         let frame = factory
             .create_luma8_with(4, 2, WaitPolicy::Immediate, |bytes| {
