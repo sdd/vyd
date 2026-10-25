@@ -2672,7 +2672,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vyd"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "parse-size",
  "toml 0.9.12+spec-1.1.0",
@@ -2683,7 +2683,7 @@ dependencies = [
 
 [[package]]
 name = "vyd-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dashmap",
@@ -2701,7 +2701,7 @@ dependencies = [
 
 [[package]]
 name = "vyd-gstreamer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2725,7 +2725,7 @@ dependencies = [
 
 [[package]]
 name = "vyd-gstreamer-gpu"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2746,7 +2746,7 @@ dependencies = [
 
 [[package]]
 name = "vyd-main"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "ctrlc",
@@ -2757,7 +2757,7 @@ dependencies = [
 
 [[package]]
 name = "vyd-telemetry"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arrow-schema",
