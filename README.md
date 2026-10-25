@@ -54,10 +54,10 @@ Pipelines that retain many CPU frames can set pool limits in the same TOML file:
 ```toml
 [cpu_pool]
 max_buffers = 96
-max_bytes = 1610612736
+max_bytes = "1.5 GiB"
 ```
 
-Both fields are optional. The defaults are 32 buffers and 256 MiB. These values cap pooled allocation; they do not preallocate buffers. Choose limits based on the frames retained by your stages and the expected frame size.
+Both fields are optional. `max_bytes` accepts an integer byte count or a quoted size such as `500 MB`, `1 GB`, or `1.5 GiB`. Decimal units (`MB`, `GB`) use powers of 1000; binary units (`MiB`, `GiB`) use powers of 1024. The defaults are 32 buffers and 256 MiB. These values cap pooled allocation; they do not preallocate buffers. Choose limits based on the frames retained by your stages and the expected frame size.
 
 GStreamer sections can be given as strings through `PipelineBuilder::with_gstreamer_nodes(boundary, "identity")`, or configured in TOML:
 

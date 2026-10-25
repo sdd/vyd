@@ -108,7 +108,7 @@ fn configure_cpu_pool(config: &toml::Value, context: &mut PipelineContext) -> Re
             )));
         }
     }
-    let read_limit = |key: &str| -> Result<Option<usize>, VydError> {
+    let read_buffer_limit = |key: &str| -> Result<Option<usize>, VydError> {
         table
             .get(key)
             .map(|value| {
@@ -123,7 +123,33 @@ fn configure_cpu_pool(config: &toml::Value, context: &mut PipelineContext) -> Re
             })
             .transpose()
     };
-    let limits = PoolLimits::new(read_limit("max_buffers")?, read_limit("max_bytes")?)
+    let max_bytes = table
+        .get("max_bytes")
+        .map(|value| match value {
+            toml::Value::Integer(number) => usize::try_from(*number).map_err(|_| {
+                VydError::GeneralPluginError(
+                    "cpu_pool.max_bytes must be a positive integer or byte size".into(),
+                )
+            }),
+            toml::Value::String(size) => parse_size::parse_size(size)
+                .map_err(|error| {
+                    VydError::GeneralPluginError(format!(
+                        "invalid cpu_pool.max_bytes size {size:?}: {error}"
+                    ))
+                })
+                .and_then(|bytes| {
+                    usize::try_from(bytes).map_err(|_| {
+                        VydError::GeneralPluginError(
+                            "cpu_pool.max_bytes exceeds the platform's addressable size".into(),
+                        )
+                    })
+                }),
+            _ => Err(VydError::GeneralPluginError(
+                "cpu_pool.max_bytes must be a positive integer or byte size".into(),
+            )),
+        })
+        .transpose()?;
+    let limits = PoolLimits::new(read_buffer_limit("max_buffers")?, max_bytes)
         .map_err(|error| VydError::GeneralPluginError(format!("invalid cpu_pool: {error}")))?;
     context.set_frame_factory(FrameFactory::new(BufferPoolManager::new(limits)));
     Ok(())
@@ -147,11 +173,34 @@ mod tests {
     }
 
     #[test]
+    fn cpu_pool_config_accepts_decimal_and_binary_byte_sizes() {
+        for (value, expected) in [
+            ("'500 MB'", 500_000_000),
+            ("'1 GB'", 1_000_000_000),
+            ("'512 MiB'", 536_870_912),
+            ("'1.5 GiB'", 1_610_612_736),
+        ] {
+            let config: toml::Value =
+                toml::from_str(&format!("[cpu_pool]\nmax_bytes = {value}\n")).unwrap();
+            let mut context = PipelineContext::new();
+            configure_cpu_pool(&config, &mut context).unwrap();
+            let snapshot = context.frame_factory().cpu_pool().snapshot().unwrap();
+            assert_eq!(snapshot.limits.max_bytes(), expected, "{value}");
+            assert_eq!(snapshot.allocated_bytes, 0);
+        }
+    }
+
+    #[test]
     fn cpu_pool_config_rejects_invalid_bounds() {
         for section in [
             "[cpu_pool]\nmax_buffers = 0\n",
             "[cpu_pool]\nmax_buffers = -1\n",
+            "[cpu_pool]\nmax_buffers = '96'\n",
+            "[cpu_pool]\nmax_bytes = 0\n",
             "[cpu_pool]\nmax_bytes = 'large'\n",
+            "[cpu_pool]\nmax_bytes = '0 MiB'\n",
+            "[cpu_pool]\nmax_bytes = '-1 GiB'\n",
+            "[cpu_pool]\nmax_bytes = '18446744073709551616 B'\n",
             "[cpu_pool]\nother = 2\n",
         ] {
             let config: toml::Value = toml::from_str(section).unwrap();
