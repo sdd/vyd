@@ -10,6 +10,7 @@ readme.workspace = true
 documentation = "https://docs.rs/vyd-gstreamer-gpu"
 
 [dependencies]
+serde = { workspace = true }
 vyd-core = { workspace = true }
 vyd_gstreamer = { package = "vyd-gstreamer", path = "../vyd_gstreamer", version = "0.2.1" }
 bytes = "1"

@@ -2,12 +2,14 @@
 pub use vyd_core::*;
 
 pub mod cli;
+mod config;
+mod recording;
 pub mod telemetry {
     pub use vyd_telemetry::*;
 }
 pub use vyd_telemetry::register_vyd_stage_codec;
 
-use std::collections::HashMap;
+use anyhow::{Context, anyhow};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use vyd_core::frame::factory::FrameFactory;
@@ -15,49 +17,7 @@ use vyd_core::frame::pool::{BufferPoolManager, PoolLimits};
 use vyd_core::pipeline::{Pipeline as StagePipeline, PipelineContext};
 use vyd_core::statistics::PipelineStatistics;
 use vyd_gstreamer::runtime::NativeNode;
-use vyd_telemetry::{
-    DumpManager, DumpRunOptions, DumpingProcessor, PublishedRun, RECORDING_FORMAT_VERSION,
-    ReplayProcessor, RunStatus, SourceFingerprint, StageRecording, VortexReader, codec_for,
-    read_manifest, schema_for,
-};
-
-fn persistence_error(error: impl std::fmt::Display) -> VydError {
-    VydError::GeneralPluginError(format!("pipeline persistence: {error}"))
-}
-
-fn dump_options_from_config(config: &toml::Value) -> Result<DumpRunOptions, VydError> {
-    let mut options = DumpRunOptions {
-        root: PathBuf::from("./dumps"),
-        run_name: None,
-        replace: false,
-    };
-    let Some(recording) = config.get("recording") else {
-        return Ok(options);
-    };
-    let table = recording
-        .as_table()
-        .ok_or_else(|| persistence_error("recording must be a table"))?;
-    for key in table.keys() {
-        if key != "dump_dir" && key != "run_name" {
-            return Err(persistence_error(format!("unknown recording field: {key}")));
-        }
-    }
-    if let Some(directory) = table.get("dump_dir") {
-        let directory = directory
-            .as_str()
-            .filter(|directory| !directory.is_empty())
-            .ok_or_else(|| persistence_error("recording.dump_dir must be a nonempty string"))?;
-        options.root = PathBuf::from(directory);
-    }
-    if let Some(name) = table.get("run_name") {
-        options.run_name = Some(
-            name.as_str()
-                .ok_or_else(|| persistence_error("recording.run_name must be a string"))?
-                .to_string(),
-        );
-    }
-    Ok(options)
-}
+use vyd_telemetry::{DumpManager, DumpRunOptions, PublishedRun, RunStatus};
 
 /// Builds a configured serial GStreamer pipeline and owns all run state.
 pub struct PipelineBuilder {
@@ -82,10 +42,11 @@ impl PipelineBuilder {
             ));
         }
         let stage_config: vyd_core::pipeline::PipelineConfig = toml::from_str(&raw_config)?;
-        let dump_options = dump_options_from_config(&config)?;
+        let runtime_config: config::Config = toml::from_str(&raw_config)?;
+        let dump_options = runtime_config.recording.try_into()?;
         let nodes = vyd_gstreamer::pipeline_config::nodes_from_config(&config)?;
         let mut context = PipelineContext::new();
-        configure_cpu_pool(&config, &mut context)?;
+        configure_cpu_pool(runtime_config.cpu_pool, &mut context)?;
         vyd_gstreamer::pipeline_config::configure_gpu(&config, &mut context)?;
         Ok(Self {
             config_path,
@@ -135,9 +96,9 @@ impl PipelineBuilder {
             self.dump_options.run_name = Some(name);
         }
         if replace_run && self.dump_options.run_name.is_none() {
-            return Err(persistence_error(
-                "--replace-run requires --run-name or recording.run_name",
-            ));
+            return Err(VydError::PersistenceError(anyhow!(
+                "--replace-run requires --run-name or recording.run_name"
+            )));
         }
         self.dump_options.replace = replace_run;
         Ok(self)
@@ -157,154 +118,15 @@ impl PipelineBuilder {
     }
 
     pub fn build(mut self) -> Result<Pipeline, VydError> {
-        for stage in [
-            self.stage_config.source_stage(),
-            self.stage_config.sink_stage(),
-        ] {
-            if stage.dump || stage.replay.is_some() {
-                return Err(persistence_error(
-                    "dump/replay currently supports processors only",
-                ));
-            }
-        }
-        let has_dump = self
-            .stage_config
-            .processor_stages()
-            .iter()
-            .any(|stage| stage.dump);
-        for (index, stage) in self.stage_config.processor_stages().iter().enumerate() {
-            if stage.dump && stage.replay.is_some() {
-                return Err(persistence_error(format!(
-                    "stage {index} cannot set both dump and replay"
-                )));
-            }
-        }
-        let source_fingerprint = source_fingerprint(&self.config)?;
-        let manager = has_dump
-            .then(|| {
-                DumpManager::new(
-                    self.dump_options.clone(),
-                    self.raw_config.clone(),
-                    self.stage_config.source_type().to_string(),
-                )
-                .map_err(persistence_error)
-            })
-            .transpose()?;
-        if let Some(manager) = &manager {
-            manager
-                .set_source_fingerprint(source_fingerprint.clone())
-                .map_err(persistence_error)?;
-        }
-        let mut replacements: HashMap<usize, Box<dyn FrameProcessor>> = HashMap::new();
-        for (index, stage) in self.stage_config.processor_stages().iter().enumerate() {
-            let Some(recording_path) = &stage.replay else {
-                continue;
-            };
-            let path = Path::new(recording_path);
-            let path = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                self.config_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(path)
-            };
-            let directory = path
-                .parent()
-                .ok_or_else(|| persistence_error("invalid replay path"))?;
-            let manifest = read_manifest(directory).map_err(persistence_error)?;
-            if manifest.format_version != RECORDING_FORMAT_VERSION {
-                return Err(persistence_error(format!(
-                    "unsupported recording format version {}",
-                    manifest.format_version
-                )));
-            }
-            if !manifest.status.is_replayable() {
-                return Err(persistence_error("replay recording was not finalized"));
-            }
-            if manifest.source_fingerprint != source_fingerprint {
-                return Err(persistence_error(format!(
-                    "replay source file changed at stage {index}"
-                )));
-            }
-            let file_name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| persistence_error("invalid replay file name"))?;
-            let entry = manifest
-                .stages
-                .iter()
-                .find(|entry| entry.file == file_name)
-                .ok_or_else(|| persistence_error("replay stage not found in manifest"))?;
-            let codec = codec_for(&stage.stage_type)?.ok_or_else(|| {
-                persistence_error(format!("stage {} has no replay codec", stage.stage_type))
-            })?;
-            if entry.stage_type != stage.stage_type || entry.codec_version != codec.version() {
-                return Err(persistence_error(format!(
-                    "replay stage type or codec version mismatch at stage {index}"
-                )));
-            }
-            let expected_upstream = upstream_signature(&self.config, index)?;
-            if entry.upstream_signature != expected_upstream {
-                // Older recordings included [recording] in this signature.
-                // Recompute it from their stored config so run location and name
-                // cannot affect replay compatibility.
-                let recorded: toml::Value =
-                    toml::from_str(&manifest.config).map_err(persistence_error)?;
-                if upstream_signature(&recorded, index)? != expected_upstream {
-                    return Err(persistence_error(format!(
-                        "replay upstream configuration mismatch at stage {index}"
-                    )));
-                }
-            }
-            if !path.is_file() {
-                return Err(persistence_error(format!(
-                    "replay file {} is missing",
-                    path.display()
-                )));
-            }
-            let reader = VortexReader::new(path).map_err(persistence_error)?;
-            replacements.insert(
-                index,
-                Box::new(ReplayProcessor::new(
-                    codec,
-                    reader,
-                    manifest.status == RunStatus::Cancelled,
-                )),
-            );
-        }
+        self.validate_recording_stages()?;
+        let fingerprint = recording::source_fingerprint(&self.config)?;
+        let manager = self.create_dump_manager(fingerprint.clone())?;
+        let mut replacements = self.replay_processors(fingerprint.as_ref())?;
         let mut stages = vyd_core::pipeline::build_pipeline_with_processor_resolver(
             &self.stage_config,
             |index, _| Ok(replacements.remove(&index)),
         )?;
-        let mut wrapped = Vec::with_capacity(stages.stages.len());
-        for (index, stage) in std::mem::take(&mut stages.stages).into_iter().enumerate() {
-            let config = &self.stage_config.processor_stages()[index];
-            let inner: Box<dyn FrameProcessor> = if config.dump {
-                let manager = manager.as_ref().expect("dump directory was checked");
-                let codec = codec_for(&config.stage_type)?.ok_or_else(|| {
-                    persistence_error(format!("stage {} has no dump codec", config.stage_type))
-                })?;
-                let writer = manager
-                    .register_stage(
-                        StageRecording {
-                            index,
-                            name: config.name.clone(),
-                            stage_type: config.stage_type.clone(),
-                            codec_version: codec.version(),
-                            file: String::new(),
-                            upstream_signature: upstream_signature(&self.config, index)?,
-                        },
-                        schema_for(codec.as_ref())?,
-                    )
-                    .map_err(persistence_error)?;
-                Box::new(DumpingProcessor::new(stage.inner, codec, writer))
-            } else {
-                stage.inner
-            };
-            wrapped.push(vyd_core::pipeline::Stage::new(inner, stage.stage_type));
-        }
-        stages.stages = wrapped;
+        self.wrap_recording_stages(&mut stages, manager.as_ref())?;
         if let Some(manager) = &manager {
             manager.attach(&mut self.context);
         }
@@ -318,105 +140,14 @@ impl PipelineBuilder {
     }
 }
 
-fn source_fingerprint(config: &toml::Value) -> Result<Option<SourceFingerprint>, VydError> {
-    let Some(path) = config
-        .get("source")
-        .and_then(|source| source.get("file_path"))
-        .and_then(toml::Value::as_str)
-    else {
-        return Ok(None);
-    };
-    let path = std::fs::canonicalize(path).map_err(persistence_error)?;
-    let metadata = std::fs::metadata(&path).map_err(persistence_error)?;
-    let modified_ns = metadata
-        .modified()
-        .map_err(persistence_error)?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(persistence_error)?
-        .as_nanos();
-    Ok(Some(SourceFingerprint {
-        path,
-        size: metadata.len(),
-        modified_ns,
-    }))
-}
-
-fn upstream_signature(config: &toml::Value, index: usize) -> Result<String, VydError> {
-    let mut prefix = config.clone();
-    let table = prefix
-        .as_table_mut()
-        .ok_or_else(|| persistence_error("pipeline config must be a table"))?;
-    table.remove("sink");
-    table.remove("recording");
-    if let Some(stages) = table.get_mut("stages").and_then(toml::Value::as_array_mut) {
-        stages.truncate(index);
-        for stage in stages {
-            if let Some(stage) = stage.as_table_mut() {
-                stage.remove("dump");
-                stage.remove("replay");
-            }
-        }
-    }
-    toml::to_string(&prefix).map_err(persistence_error)
-}
-
-fn configure_cpu_pool(config: &toml::Value, context: &mut PipelineContext) -> Result<(), VydError> {
-    let Some(value) = config.get("cpu_pool") else {
+fn configure_cpu_pool(
+    config: Option<config::CpuPoolConfig>,
+    context: &mut PipelineContext,
+) -> Result<(), VydError> {
+    let Some(config) = config else {
         return Ok(());
     };
-    let table = value
-        .as_table()
-        .ok_or_else(|| VydError::GeneralPluginError("cpu_pool must be a table".into()))?;
-    for key in table.keys() {
-        if key != "max_buffers" && key != "max_bytes" {
-            return Err(VydError::GeneralPluginError(format!(
-                "unknown cpu_pool field: {key}"
-            )));
-        }
-    }
-    let read_buffer_limit = |key: &str| -> Result<Option<usize>, VydError> {
-        table
-            .get(key)
-            .map(|value| {
-                value
-                    .as_integer()
-                    .and_then(|number| usize::try_from(number).ok())
-                    .ok_or_else(|| {
-                        VydError::GeneralPluginError(format!(
-                            "cpu_pool.{key} must be a positive integer"
-                        ))
-                    })
-            })
-            .transpose()
-    };
-    let max_bytes = table
-        .get("max_bytes")
-        .map(|value| match value {
-            toml::Value::Integer(number) => usize::try_from(*number).map_err(|_| {
-                VydError::GeneralPluginError(
-                    "cpu_pool.max_bytes must be a positive integer or byte size".into(),
-                )
-            }),
-            toml::Value::String(size) => parse_size::parse_size(size)
-                .map_err(|error| {
-                    VydError::GeneralPluginError(format!(
-                        "invalid cpu_pool.max_bytes size {size:?}: {error}"
-                    ))
-                })
-                .and_then(|bytes| {
-                    usize::try_from(bytes).map_err(|_| {
-                        VydError::GeneralPluginError(
-                            "cpu_pool.max_bytes exceeds the platform's addressable size".into(),
-                        )
-                    })
-                }),
-            _ => Err(VydError::GeneralPluginError(
-                "cpu_pool.max_bytes must be a positive integer or byte size".into(),
-            )),
-        })
-        .transpose()?;
-    let limits = PoolLimits::new(read_buffer_limit("max_buffers")?, max_bytes)
-        .map_err(|error| VydError::GeneralPluginError(format!("invalid cpu_pool: {error}")))?;
+    let limits = PoolLimits::try_from(config).map_err(vyd_core::frame::FrameError::from)?;
     context.set_frame_factory(FrameFactory::new(BufferPoolManager::new(limits)));
     Ok(())
 }
@@ -424,6 +155,20 @@ fn configure_cpu_pool(config: &toml::Value, context: &mut PipelineContext) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recording::upstream_signature;
+
+    fn dump_options_from_config(value: &toml::Value) -> Result<DumpRunOptions, VydError> {
+        let config: config::Config = value.clone().try_into()?;
+        Ok(config.recording.try_into()?)
+    }
+
+    fn configure_cpu_pool(
+        value: &toml::Value,
+        context: &mut PipelineContext,
+    ) -> Result<(), VydError> {
+        let config: config::Config = value.clone().try_into()?;
+        super::configure_cpu_pool(config.cpu_pool, context)
+    }
 
     #[test]
     fn recording_config_defaults_and_cli_precedence() {
@@ -630,7 +375,7 @@ impl Pipeline {
                                 RunTermination::EndOfStream => RunStatus::Completed,
                                 RunTermination::Cancelled => RunStatus::Cancelled,
                             })
-                            .map_err(persistence_error)
+                            .context("publish pipeline recording")
                     })
                     .transpose()?;
                 Ok(PipelineRun {

@@ -178,7 +178,7 @@ impl Drop for VortexWriter {
 }
 
 struct ReadState {
-    receive: Option<Receiver<Result<RecordBatch, String>>>,
+    receive: Option<Receiver<Result<RecordBatch>>>,
     current: Option<(RecordBatch, usize)>,
     worker: Option<JoinHandle<()>>,
 }
@@ -194,7 +194,7 @@ impl VortexReader {
             .name("vyd-vortex-reader".into())
             .spawn(move || {
                 if let Err(error) = read_file(path, &send) {
-                    let _ = send.send(Err(error.to_string()));
+                    let _ = send.send(Err(error));
                 }
             })?;
         Ok(Self(Mutex::new(ReadState {
@@ -223,7 +223,7 @@ impl VortexReader {
             };
             match receive.recv() {
                 Ok(Ok(batch)) => state.current = Some((batch, 0)),
-                Ok(Err(error)) => return Err(anyhow!(error)),
+                Ok(Err(error)) => return Err(error),
                 Err(_) => return Ok(None),
             }
         }
@@ -247,10 +247,12 @@ impl VortexReader {
     }
 }
 
-fn read_file(path: PathBuf, send: &SyncSender<Result<RecordBatch, String>>) -> Result<()> {
+fn read_file(path: PathBuf, send: &SyncSender<Result<RecordBatch>>) -> Result<()> {
     let runtime = CurrentThreadRuntime::new();
     let session = VortexSession::default().with_handle(runtime.handle());
-    let file = runtime.block_on(session.open_options().open_path(&path))?;
+    let file = runtime
+        .block_on(session.open_options().open_path(&path))
+        .with_context(|| format!("open Vortex recording {}", path.display()))?;
     let schema = session.arrow().to_arrow_schema(file.dtype())?;
     let target = Field::new("", DataType::Struct(schema.fields.clone()), false);
     let stream = file.scan()?.into_array_stream()?;

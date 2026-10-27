@@ -10,6 +10,7 @@ pub mod gst_source;
 pub mod managed_pool;
 pub mod pipeline_config;
 pub mod runtime;
+pub mod source_config;
 pub mod vyd_frame_queue;
 pub mod vyd_gst_allocator;
 pub mod vyd_gst_buffer_pool;

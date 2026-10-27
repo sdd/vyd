@@ -12,14 +12,78 @@ struct NodeConfig {
     boundary: usize,
     pipeline: String,
     bridge_capacity: Option<usize>,
-    correspondence: Option<String>,
+    correspondence: Option<Correspondence>,
     input_size: Option<[u32; 2]>,
     output_size: Option<[u32; 2]>,
-    annotation_policy: Option<String>,
+    annotation_policy: Option<AnnotationPolicy>,
 }
 
-fn invalid(message: impl std::fmt::Display) -> VydError {
-    VydError::GeneralPluginError(format!("GStreamer node configuration: {message}"))
+#[derive(Default, Deserialize)]
+struct PipelineConfig {
+    #[serde(default)]
+    gstreamer_nodes: Vec<NodeConfig>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Correspondence {
+    OneToOneOrdered,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AnnotationPolicy {
+    DropAll,
+}
+
+impl NodeConfig {
+    fn build(self) -> Result<NativeNode, VydError> {
+        if self.pipeline.trim().is_empty() {
+            return Err(VydError::PluginInvalidConfigError(
+                "pipeline description must not be empty".into(),
+            ));
+        }
+        let section = NativeNode::description(self.boundary, self.pipeline.clone());
+        let section = self.apply_bridge(section)?;
+        self.apply_geometry(section)
+    }
+
+    fn apply_bridge(&self, section: NativeNode) -> Result<NativeNode, VydError> {
+        match (self.bridge_capacity, self.correspondence) {
+            (Some(capacity), Some(Correspondence::OneToOneOrdered)) => {
+                section.with_fifo_bridge(capacity, FrameCorrespondence::OneToOneOrdered)
+            }
+            (None, None) => Ok(section),
+            _ => Err(VydError::PluginInvalidConfigError(
+                "bridge_capacity requires correspondence = 'one_to_one_ordered'".into(),
+            )),
+        }
+    }
+
+    fn apply_geometry(&self, section: NativeNode) -> Result<NativeNode, VydError> {
+        match (self.input_size, self.output_size) {
+            (Some(input), Some(output)) => {
+                let geometry = NativeGeometry::new((input[0], input[1]), (output[0], output[1]))?;
+                let section = section.with_packed_gray8_geometry(geometry);
+                match self.annotation_policy {
+                    Some(AnnotationPolicy::DropAll) => {
+                        Ok(section.with_annotation_update(|annotations, _| {
+                            annotations.clear();
+                            Ok(())
+                        }))
+                    }
+                    None if input == output => Ok(section),
+                    None => Err(VydError::PluginInvalidConfigError(
+                        "geometry changes require annotation_policy = 'drop_all'".into(),
+                    )),
+                }
+            }
+            (None, None) if self.annotation_policy.is_none() => Ok(section),
+            _ => Err(VydError::PluginInvalidConfigError(
+                "input_size and output_size must be declared together".into(),
+            )),
+        }
+    }
 }
 
 /// A temporary config convention until stages declare capabilities directly.
@@ -38,65 +102,11 @@ pub fn gpu_stage_requested(config: &toml::Value) -> bool {
 /// Build native sections from GStreamer pipeline descriptions. Geometry
 /// changes must be declared and invalidate all input-grid annotations.
 pub fn nodes_from_config(config: &toml::Value) -> Result<Vec<NativeNode>, VydError> {
-    let Some(raw_nodes) = config.get("gstreamer_nodes") else {
-        return Ok(Vec::new());
-    };
-    let nodes = raw_nodes
-        .as_array()
-        .ok_or_else(|| invalid("gstreamer_nodes must be an array of tables"))?;
-    nodes
-        .iter()
-        .map(|value| {
-            let node: NodeConfig = value
-                .clone()
-                .try_into()
-                .map_err(|error| invalid(format!("invalid node: {error}")))?;
-            if node.pipeline.trim().is_empty() {
-                return Err(invalid("pipeline description must not be empty"));
-            }
-            let mut section = NativeNode::description(node.boundary, node.pipeline);
-            match (node.bridge_capacity, node.correspondence.as_deref()) {
-                (Some(capacity), Some("one_to_one_ordered")) => {
-                    section =
-                        section.with_fifo_bridge(capacity, FrameCorrespondence::OneToOneOrdered)?;
-                }
-                (None, None) => {}
-                _ => {
-                    return Err(invalid(
-                        "bridge_capacity requires correspondence = 'one_to_one_ordered'",
-                    ))
-                }
-            }
-            match (node.input_size, node.output_size) {
-                (Some(input), Some(output)) => {
-                    let geometry =
-                        NativeGeometry::new((input[0], input[1]), (output[0], output[1]))?;
-                    section = section.with_packed_gray8_geometry(geometry);
-                    match node.annotation_policy.as_deref() {
-                        Some("drop_all") => {
-                            section = section.with_annotation_update(|annotations, _| {
-                                annotations.clear();
-                                Ok(())
-                            });
-                        }
-                        None if input == output => {}
-                        None => {
-                            return Err(invalid(
-                                "geometry changes require annotation_policy = 'drop_all'",
-                            ))
-                        }
-                        _ => return Err(invalid("unsupported annotation_policy")),
-                    }
-                }
-                (None, None) if node.annotation_policy.is_none() => {}
-                _ => {
-                    return Err(invalid(
-                        "input_size and output_size must be declared together",
-                    ))
-                }
-            }
-            Ok(section)
-        })
+    let config: PipelineConfig = config.clone().try_into()?;
+    config
+        .gstreamer_nodes
+        .into_iter()
+        .map(NodeConfig::build)
         .collect()
 }
 
@@ -107,16 +117,20 @@ pub fn configure_gpu(config: &toml::Value, context: &mut PipelineContext) -> Res
     }
     #[cfg(feature = "gpu-wgpu")]
     {
-        let gpu =
-            vyd_core::gpu::WgpuContext::request_blocking(Default::default()).map_err(invalid)?;
+        let gpu = vyd_core::gpu::WgpuContext::request_blocking(Default::default())
+            .map_err(vyd_core::gpu::transfer::GpuTransferError::from)?;
         tracing::info!(adapter = %gpu.adapter_info().name, backend = ?gpu.adapter_info().backend, "GPU adapter selected");
-        context.set_wgpu_context(Arc::new(gpu)).map_err(invalid)?;
+        context
+            .set_wgpu_context(Arc::new(gpu))
+            .map_err(vyd_core::gpu::transfer::GpuTransferError::from)?;
         Ok(())
     }
     #[cfg(not(feature = "gpu-wgpu"))]
     {
         let _ = context;
-        Err(invalid("GPU stages require the gpu-wgpu feature"))
+        Err(VydError::PluginInvalidConfigError(
+            "GPU stages require the gpu-wgpu feature".into(),
+        ))
     }
 }
 

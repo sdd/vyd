@@ -1,3 +1,4 @@
+use anyhow::{Context, anyhow};
 use arrow_array::RecordBatch;
 use arrow_schema::FieldRef;
 use serde::Serialize;
@@ -6,10 +7,6 @@ use serde_arrow::schema::{SchemaLike, TracingOptions};
 use std::sync::Arc;
 use vyd_core::caps::ProcessorPortSpecs;
 use vyd_core::{FrameContext, FrameProcessorResult, VydError};
-
-fn codec_error(error: impl std::fmt::Display) -> VydError {
-    VydError::GeneralPluginError(format!("stage codec: {error}"))
-}
 
 /// A processor-owned description of its metadata output. `Row` must serialize
 /// as a struct whose fields become independent Vortex columns.
@@ -58,10 +55,12 @@ struct CodecAdapter<C: TypedStageCodec> {
 
 impl<C: TypedStageCodec> CodecAdapter<C> {
     fn new() -> Result<Self, VydError> {
-        let fields =
-            Vec::<FieldRef>::from_type::<C::Row>(TracingOptions::default()).map_err(codec_error)?;
+        let fields = Vec::<FieldRef>::from_type::<C::Row>(TracingOptions::default())
+            .context("derive stage codec schema")?;
         if fields.is_empty() {
-            return Err(codec_error("output row must have at least one named field"));
+            return Err(VydError::PersistenceError(anyhow!(
+                "output row must have at least one named field"
+            )));
         }
         Ok(Self {
             codec: C::default(),
@@ -85,7 +84,8 @@ impl<C: TypedStageCodec> StageCodec for CodecAdapter<C> {
         result: FrameProcessorResult,
     ) -> Result<RecordBatch, VydError> {
         let row = self.codec.capture(frame, result)?;
-        serde_arrow::to_record_batch(&self.fields, &[row]).map_err(codec_error)
+        Ok(serde_arrow::to_record_batch(&self.fields, &[row])
+            .context("serialize stage codec output")?)
     }
 
     fn restore_batch(
@@ -94,9 +94,10 @@ impl<C: TypedStageCodec> StageCodec for CodecAdapter<C> {
         result: FrameProcessorResult,
         batch: &RecordBatch,
     ) -> Result<(), VydError> {
-        let mut rows: Vec<C::Row> = serde_arrow::from_record_batch(batch).map_err(codec_error)?;
+        let mut rows: Vec<C::Row> =
+            serde_arrow::from_record_batch(batch).context("deserialize stage codec output")?;
         if rows.len() != 1 {
-            return Err(codec_error(format!(
+            return Err(VydError::PersistenceError(anyhow!(
                 "expected one output row, got {}",
                 rows.len()
             )));

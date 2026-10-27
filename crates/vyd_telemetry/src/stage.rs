@@ -1,5 +1,6 @@
 use crate::vortex_file::{VortexReader, VortexWriter};
 use crate::{StageCodec, record};
+use anyhow::{Context, anyhow};
 use std::sync::{Arc, Mutex};
 use vyd_core::caps::ProcessorPortSpecs;
 use vyd_core::pipeline::PipelineContext;
@@ -49,9 +50,9 @@ impl FrameProcessor for DumpingProcessor {
         let batch = record::capture(self.codec.as_ref(), frame, result)?;
         self.writer
             .lock()
-            .map_err(|_| VydError::GeneralPluginError("Vortex writer lock poisoned".into()))?
+            .map_err(|_| anyhow!("Vortex writer lock poisoned"))?
             .write(batch)
-            .map_err(|error| VydError::GeneralPluginError(format!("Vortex dump: {error}")))?;
+            .context("write Vortex frame")?;
         Ok(result)
     }
 
@@ -107,10 +108,7 @@ impl FrameProcessor for ReplayProcessor {
         frame: &mut FrameContext,
         context: &mut PipelineContext,
     ) -> Result<FrameProcessorResult, VydError> {
-        let row = self
-            .reader
-            .next_row()
-            .map_err(|error| VydError::GeneralPluginError(format!("Vortex replay: {error}")))?;
+        let row = self.reader.next_row().context("read Vortex replay frame")?;
         let Some(row) = row else {
             if self.allow_prefix_end {
                 context
@@ -121,7 +119,7 @@ impl FrameProcessor for ReplayProcessor {
                     .cancel();
                 return Ok(FrameProcessorResult::Skip);
             }
-            return Err(VydError::GeneralPluginError(format!(
+            return Err(VydError::PersistenceError(anyhow!(
                 "replay ends before frame {}",
                 frame.frame_index
             )));
@@ -137,16 +135,14 @@ impl FrameProcessor for ReplayProcessor {
             && self
                 .reader
                 .next_row()
-                .map_err(|error| VydError::GeneralPluginError(format!("Vortex replay: {error}")))?
+                .context("check Vortex replay end")?
                 .is_some()
         {
-            return Err(VydError::GeneralPluginError(
-                "replay has frames after source end".into(),
-            ));
+            return Err(VydError::PersistenceError(anyhow!(
+                "replay has frames after source end"
+            )));
         }
-        self.reader
-            .close()
-            .map_err(|error| VydError::GeneralPluginError(format!("Vortex replay reader: {error}")))
+        Ok(self.reader.close().context("close Vortex replay reader")?)
     }
 
     fn name(&self) -> &str {

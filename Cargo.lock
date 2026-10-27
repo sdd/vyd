@@ -3560,6 +3560,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-util"
+version = "0.7.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "toml"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4453,8 +4467,10 @@ dependencies = [
 name = "vyd"
 version = "0.2.1"
 dependencies = [
+ "anyhow",
  "clap",
  "parse-size",
+ "serde",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "vyd-core",
@@ -4466,6 +4482,7 @@ dependencies = [
 name = "vyd-core"
 version = "0.1.1"
 dependencies = [
+ "anyhow",
  "chrono",
  "dashmap",
  "image",
@@ -4475,6 +4492,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio-util",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "wgpu",
@@ -4514,6 +4532,7 @@ dependencies = [
  "http",
  "metrics",
  "once_cell",
+ "serde",
  "thiserror 2.0.21",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
