@@ -51,6 +51,12 @@ impl VydGstSink {
     }
 }
 
+impl Default for VydGstSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 mod imp {
     use super::*;
     use gst::glib::Cast;

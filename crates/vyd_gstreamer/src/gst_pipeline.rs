@@ -63,13 +63,11 @@ fn build_generic_pipeline(
 
     // Find decodebin and connect its pad-added signal
     let mut decodebin = None;
-    for element in pipeline.iterate_elements() {
-        if let Ok(element) = element {
-            if let Some(factory) = element.factory() {
-                if factory.name().as_str().contains("decodebin") {
-                    decodebin = Some(element);
-                    break;
-                }
+    for element in pipeline.iterate_elements().into_iter().flatten() {
+        if let Some(factory) = element.factory() {
+            if factory.name().as_str().contains("decodebin") {
+                decodebin = Some(element);
+                break;
             }
         }
     }

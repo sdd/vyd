@@ -14,11 +14,9 @@ vyd-core = { workspace = true }
 vyd_gstreamer = { package = "vyd-gstreamer", path = "../vyd_gstreamer", version = "0.2.1" }
 bytes = "1"
 gst = { package = "gstreamer", version = "0.21", features = ["v1_20"] }
-gst-allocators = { package = "gstreamer-allocators", version = "0.21.2" }
 gst-base = { package = "gstreamer-base", version = "0.21.2" }
 gst-video = { package = "gstreamer-video", version = "0.21.2" }
 http = "1"
-image = { workspace = true }
 metrics = "0.24"
 once_cell = { workspace = true }
 toml = { workspace = true }

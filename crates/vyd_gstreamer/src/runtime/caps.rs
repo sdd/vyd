@@ -30,7 +30,7 @@ fn gray8_info(caps: &gst::CapsRef) -> Result<gst_video::VideoInfo, VydError> {
     {
         return Err(error("native boundary requires SystemMemory caps"));
     }
-    let info = gst_video::VideoInfo::from_caps(&caps).map_err(error)?;
+    let info = gst_video::VideoInfo::from_caps(caps).map_err(error)?;
     if info.format() != gst_video::VideoFormat::Gray8 {
         return Err(error("native boundary requires GRAY8 format"));
     }

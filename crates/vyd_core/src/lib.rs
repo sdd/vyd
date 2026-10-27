@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 pub mod annotations;
+pub mod cancellation;
 pub mod caps;
 pub mod error;
 pub mod frame;
@@ -16,6 +17,7 @@ pub mod stages;
 pub mod statistics;
 pub mod traits;
 
+pub use cancellation::CancellationToken;
 pub use error::VydError;
 pub use frame::Frame;
 pub use traits::{FrameProcessor, FrameSink, FrameSource, StageFactory};
@@ -92,6 +94,7 @@ impl FrameContext {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameProcessorResult {
     Continue,
     Skip,

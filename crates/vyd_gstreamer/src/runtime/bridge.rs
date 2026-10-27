@@ -54,7 +54,7 @@ fn report(shared: &Shared, message: impl std::fmt::Display) {
         }
         runtime.stats.clone()
     };
-    stats.stop();
+    stats.cancellation_token().cancel();
 }
 
 fn flush(state: &Arc<Mutex<BridgeState>>, input: bool, starting: bool) {
@@ -134,7 +134,7 @@ pub(super) fn install(
                 let mut sidecar = entry_state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if sidecar.closed || !entry_stats.is_running() {
+                if sidecar.closed || entry_stats.cancellation_token().is_cancelled() {
                     sidecar.closed = true;
                     sidecar.pending.clear();
                     return gst::PadProbeReturn::Drop;
@@ -199,7 +199,7 @@ pub(super) fn install(
                 let mut sidecar = exit_state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if sidecar.closed || !exit_stats.is_running() {
+                if sidecar.closed || exit_stats.cancellation_token().is_cancelled() {
                     sidecar.closed = true;
                     sidecar.pending.clear();
                     return gst::PadProbeReturn::Drop;

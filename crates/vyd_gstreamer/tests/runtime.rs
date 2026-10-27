@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use gst::prelude::*;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -980,7 +982,7 @@ fn fifo_bridge_cancellation_releases_admitted_context_and_finalizes() {
             .unwrap();
     });
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    stats.stop();
+    stats.cancellation_token().cancel();
     *gate.0.lock().unwrap() = true;
     gate.1.notify_all();
     let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -1099,7 +1101,7 @@ fn shutdown_timeout_retains_a_blocked_stage_until_it_can_be_finalized() {
     });
     entered.recv_timeout(Duration::from_secs(5)).unwrap();
     let start = Instant::now();
-    stats.stop();
+    stats.cancellation_token().cancel();
     let result = result_rx.recv_timeout(Duration::from_secs(2));
     let not_finalized = finished.try_recv().is_err();
     // Always release the callback before asserting, even when the deadline test fails.
@@ -1169,11 +1171,18 @@ fn gst_stage_failure_finalizes_telemetry() {
     let events = Events::default();
     let frames = Frames::default();
     let (mut ctx, pipeline) = fixture(&events, &frames, "processor");
-    vyd_telemetry::DumpManager::new(&directory)
-        .unwrap()
-        .with_config("gst error case".into())
-        .with_source("fixture".into())
-        .attach(&mut ctx);
+    let manager = vyd_telemetry::DumpManager::new(
+        vyd_telemetry::DumpRunOptions {
+            root: directory.clone(),
+            run_name: Some("failure".into()),
+            replace: false,
+        },
+        "gst error case".into(),
+        "fixture".into(),
+    )
+    .unwrap();
+    let staging = manager.staging_dir().unwrap();
+    manager.attach(&mut ctx);
     let error = run_pipeline(ctx, pipeline, None).unwrap_err();
     assert!(matches!(
         error,
@@ -1183,10 +1192,9 @@ fn gst_stage_failure_finalizes_telemetry() {
         }
     ));
     let metadata: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(directory.join("run_metadata.json")).unwrap())
-            .unwrap();
+        serde_json::from_slice(&std::fs::read(staging.join("manifest.json")).unwrap()).unwrap();
     let statistics: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(directory.join("run_statistics.json")).unwrap())
+        serde_json::from_slice(&std::fs::read(staging.join("run_statistics.json")).unwrap())
             .unwrap();
     assert!(metadata.is_object());
     assert_eq!(statistics["frame_count"], 0);

@@ -96,7 +96,7 @@ impl FrameFactory {
             .checked_mul(rows)
             .ok_or(super::layout::LayoutError::Overflow)?;
         let lease = self.pool.try_acquire_zeroed(bytes, wait)?;
-        Ok(Frame::from_shared(lease, width, height)?)
+        Frame::from_shared(lease, width, height)
     }
 
     /// Fill the uniquely leased backing before publishing it as a Frame.
@@ -117,6 +117,6 @@ impl FrameFactory {
             .ok_or(super::layout::LayoutError::Overflow)?;
         let mut lease = self.pool.try_acquire(bytes, wait)?;
         fill(lease.try_write(WaitPolicy::Immediate)?)?;
-        Ok(Frame::from_shared(lease, width, height)?)
+        Frame::from_shared(lease, width, height)
     }
 }

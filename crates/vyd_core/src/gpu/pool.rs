@@ -257,7 +257,7 @@ impl GpuPoolManager {
         wait: WaitPolicy,
     ) -> Result<StagingLease, GpuPoolError> {
         self.ensure_device(context)?;
-        if size == 0 || size % wgpu::MAP_ALIGNMENT != 0 {
+        if size == 0 || !size.is_multiple_of(wgpu::MAP_ALIGNMENT) {
             return Err(GpuPoolError::InvalidSize);
         }
         if size > context.device().limits().max_buffer_size {

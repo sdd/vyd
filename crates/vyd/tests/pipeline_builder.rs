@@ -6,9 +6,12 @@ fn facade_builds_and_runs_gstreamer_pipeline() {
     let pipeline = vyd::PipelineBuilder::from_config_file(config)
         .unwrap()
         .with_gstreamer_nodes(0, "identity")
-        .build();
+        .build()
+        .unwrap();
     let stats = pipeline.statistics();
-    let context = pipeline.run().unwrap();
+    let run = pipeline.run_with_outcome().unwrap();
+    assert_eq!(run.termination, vyd::RunTermination::EndOfStream);
+    let context = run.context;
     assert_eq!(stats.snapshot().frame_count, 5);
     assert_eq!(
         context
@@ -16,4 +19,16 @@ fn facade_builds_and_runs_gstreamer_pipeline() {
             .load(Ordering::SeqCst),
         5
     );
+}
+
+#[test]
+fn facade_reports_requested_cancellation() {
+    let config = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/basic.toml");
+    let pipeline = vyd::PipelineBuilder::from_config_file(config)
+        .unwrap()
+        .build()
+        .unwrap();
+    pipeline.cancellation_token().cancel();
+    let run = pipeline.run_with_outcome().unwrap();
+    assert_eq!(run.termination, vyd::RunTermination::Cancelled);
 }

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::num::NonZeroUsize;
 use vyd_core::frame::factory::FrameFactory;
 use vyd_core::frame::layout::{CpuLayout, FrameSpec};

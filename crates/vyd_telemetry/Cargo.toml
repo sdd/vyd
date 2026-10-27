@@ -3,7 +3,7 @@ name = "vyd-telemetry"
 version = "0.2.1"
 edition = "2024"
 authors.workspace = true
-description = "Parquet telemetry and run statistics for Vyd pipelines"
+description = "Vortex telemetry and run statistics for Vyd pipelines"
 repository.workspace = true
 license.workspace = true
 readme.workspace = true
@@ -13,12 +13,15 @@ documentation = "https://docs.rs/vyd-telemetry"
 vyd-core = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
-parquet = { workspace = true }
+vortex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_arrow = { version = "0.13", features = ["arrow-56"] }
-arrow-schema = "56"
+serde_arrow = { version = "0.15.1", features = ["arrow-59"] }
+arrow-schema = "59.2"
+arrow-array = "59.2"
 tracing = { workspace = true }
 rand = "0.8.5"
+fs2 = "0.4"
+futures = "0.3"
 
 toml = { workspace = true }

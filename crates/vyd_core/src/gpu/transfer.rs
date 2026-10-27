@@ -546,10 +546,10 @@ impl GpuTransfer {
         let progress = Arc::downgrade(&self.context.progress);
         staging.buffer().slice(..).map_async(mode, move |result| {
             drop(retained_planes);
-            if let Err(mpsc::SendError(result)) = sender.send(result) {
-                if result.is_ok() {
-                    held.buffer().unmap();
-                }
+            if let Err(mpsc::SendError(result)) = sender.send(result)
+                && result.is_ok()
+            {
+                held.buffer().unmap();
             }
             if let Some(progress) = progress.upgrade() {
                 progress.end_transfer();
@@ -626,11 +626,16 @@ fn pack_rows(
             let start = row_start(plane, row)?;
             let physical = &mut staging[start..start + plane.width as usize * 4];
             if index == 0 {
-                for (texel, &y) in physical.chunks_exact_mut(4).zip(source) {
+                for (texel, &y) in physical.as_chunks_mut::<4>().0.iter_mut().zip(source) {
                     texel.copy_from_slice(&[y, 0, 0, 255]);
                 }
             } else {
-                for (texel, uv) in physical.chunks_exact_mut(4).zip(source.chunks_exact(2)) {
+                for (texel, uv) in physical
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(source.as_chunks::<2>().0.iter())
+                {
                     texel.copy_from_slice(&[uv[0], uv[1], 0, 255]);
                 }
             }
@@ -651,13 +656,18 @@ fn unpack_rows(
             let start = row_start(plane, row)?;
             let physical = &staging[start..start + plane.width as usize * 4];
             if index == 0 {
-                for (y, texel) in destination.iter_mut().zip(physical.chunks_exact(4)) {
+                for (y, texel) in destination
+                    .iter_mut()
+                    .zip(physical.as_chunks::<4>().0.iter())
+                {
                     *y = texel[0];
                 }
             } else {
                 for (uv, texel) in destination
-                    .chunks_exact_mut(2)
-                    .zip(physical.chunks_exact(4))
+                    .as_chunks_mut::<2>()
+                    .0
+                    .iter_mut()
+                    .zip(physical.as_chunks::<4>().0.iter())
                 {
                     uv.copy_from_slice(&texel[..2]);
                 }
@@ -912,11 +922,19 @@ mod tests {
                 if index == 0 {
                     assert!(
                         visible
-                            .chunks_exact(4)
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
                             .all(|texel| texel[1..] == [0, 0, 255])
                     );
                 } else {
-                    assert!(visible.chunks_exact(4).all(|texel| texel[2..] == [0, 255]));
+                    assert!(
+                        visible
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .all(|texel| texel[2..] == [0, 255])
+                    );
                 }
                 assert!(
                     physical[start + copied..start + plane.pitch as usize]

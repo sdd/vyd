@@ -1,4 +1,5 @@
 #![cfg(feature = "gpu-wgpu")]
+#![recursion_limit = "256"]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

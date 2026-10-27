@@ -21,20 +21,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let config = Config::parse_args();
 
-    let pipeline = vyd::PipelineBuilder::from_config_file(&config.config_path)?.build();
+    let builder = vyd::PipelineBuilder::from_config_file(&config.config_path)?;
+    let pipeline = config.run.apply_to(builder)?.build()?;
     let stats = pipeline.statistics();
-    let stats_for_signal = stats.clone();
+    let cancellation = pipeline.cancellation_token();
 
     // Set up Ctrl+C handler
     ctrlc::set_handler(move || {
         println!("\nShutting down...");
-        stats_for_signal.stop();
+        cancellation.cancel();
     })
     .expect("Error setting Ctrl-C handler");
 
-    pipeline.run()?;
+    let run = pipeline.run_with_outcome()?;
 
-    // If we reach here, the pipeline completed naturally
+    // A clean end or cancellation has finalized the pipeline.
     stats.print_final_stats();
+    if let Some(recording) = run.recording {
+        println!("\n{recording}");
+    }
     Ok(())
 }

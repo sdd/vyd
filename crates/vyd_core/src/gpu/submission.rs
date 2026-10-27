@@ -544,10 +544,10 @@ fn submit_prepared(
     let completed = state.clone();
     let progress = Arc::downgrade(&context.progress);
     context.queue().on_submitted_work_done(move || {
-        if completed.queue_done() {
-            if let Some(progress) = progress.upgrade() {
-                progress.retire(id);
-            }
+        if completed.queue_done()
+            && let Some(progress) = progress.upgrade()
+        {
+            progress.retire(id);
         }
     });
     // wgpu-core's pop futures are ready after removing the device-local
