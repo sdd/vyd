@@ -483,16 +483,16 @@ mod gpu {
             if matches!(self, Frame::Gpu(_)) {
                 return Err(FrameError::UnsupportedLegacyGpuAccess);
             }
-            if let Frame::ManagedGpu(gpu) = &self {
-                if gpu.device_key() != transfer.device_key() {
-                    return Err(crate::gpu::transfer::GpuTransferError::Context(
-                        crate::gpu::GpuContextError::IncompatibleDevice {
-                            expected: transfer.device_key(),
-                            actual: gpu.device_key(),
-                        },
-                    )
-                    .into());
-                }
+            if let Frame::ManagedGpu(gpu) = &self
+                && gpu.device_key() != transfer.device_key()
+            {
+                return Err(crate::gpu::transfer::GpuTransferError::Context(
+                    crate::gpu::GpuContextError::IncompatibleDevice {
+                        expected: transfer.device_key(),
+                        actual: gpu.device_key(),
+                    },
+                )
+                .into());
             }
             let (width, height) = self.dimensions();
             let spec = FrameSpec::new(width, height, format)?;

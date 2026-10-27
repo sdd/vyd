@@ -144,7 +144,7 @@ impl PipelineSession {
 
     pub fn next_frame(&mut self) -> Result<Option<FrameContext>, VydError> {
         self.check_ready()?;
-        if !self.stats.is_running() {
+        if self.stats.cancellation_token().is_cancelled() {
             return Ok(None);
         }
         let _scope = StatsContext::new(self.stats.clone()).enter();

@@ -12,10 +12,12 @@ use crate::frame_buffer::FrameBuffer;
 use crate::ring_buffer_sink::RingBufferSink;
 
 /// Global storage for timing data keyed by buffer pointer address
+#[allow(dead_code)] // Used by the optional pad-latency instrumentation below.
 type TimingStorage = Arc<Mutex<HashMap<usize, Instant>>>;
 
 /// Normalize element names by removing numeric suffixes that GStreamer adds
 /// e.g., "decodebin0", "decodebin1" -> "decodebin"
+#[allow(dead_code)] // Used by the optional pad-latency instrumentation below.
 fn normalize_stage_name(name: &str) -> String {
     // Find where the trailing digits start
     let mut end_pos = name.len();
@@ -33,6 +35,7 @@ fn normalize_stage_name(name: &str) -> String {
 /// Instrument all static pads in the pipeline for latency measurement.
 ///
 /// Attach this after pipeline is constructed but before set to Playing.
+#[allow(dead_code)] // Opt-in diagnostic; not installed by the default GPU source.
 pub fn instrument_pipeline_latency(pipeline: &gst::Pipeline) {
     let elements: Result<Vec<_>, _> = pipeline.iterate_elements().into_iter().collect();
     let elements = elements.expect("Failed to iterate pipeline elements");

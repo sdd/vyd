@@ -9,13 +9,14 @@ pub(crate) enum InputConfig {
 
 impl InputConfig {
     pub(crate) fn is_live_mode(&self) -> bool {
-        match self {
+        matches!(
+            self,
             InputConfig::Rtsp { .. }
-            | InputConfig::File {
-                pseudo_live: true, ..
-            } => true,
-            _ => false,
-        }
+                | InputConfig::File {
+                    pseudo_live: true,
+                    ..
+                }
+        )
     }
 }
 

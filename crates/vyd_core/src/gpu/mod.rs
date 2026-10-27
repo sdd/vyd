@@ -295,8 +295,10 @@ mod tests {
 
     #[test]
     fn rejects_bad_limits_and_extents() {
-        let mut limits = wgpu::Limits::default();
-        limits.max_storage_textures_per_shader_stage = 1;
+        let mut limits = wgpu::Limits {
+            max_storage_textures_per_shader_stage: 1,
+            ..Default::default()
+        };
         assert_eq!(
             validate_capabilities(supported(), &limits),
             Err(GpuContextError::UnsupportedPlaneBindingLimits)

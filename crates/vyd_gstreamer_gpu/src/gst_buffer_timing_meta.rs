@@ -2,6 +2,7 @@ use gst::prelude::*;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[allow(dead_code)] // Reserved failures for the optional timing instrumentation path.
 pub enum TimingMetaError {
     #[error("Failed to add timing metadata to buffer")]
     AddMetaFailed,
@@ -118,6 +119,7 @@ impl TimingMeta {
     }
 
     /// Print timing summary for a buffer showing elapsed time from start and delta from previous
+    #[allow(dead_code)] // Manual diagnostic helper; normal runs export timing separately.
     pub fn print_timing_summary(buffer: &gst::BufferRef) {
         let timing_events = Self::extract_timing_data(buffer);
 

@@ -237,10 +237,12 @@ impl PipelineContext {
         F: FnOnce() -> T,
     {
         match self.metadata.entry(key.to_string()) {
-            Entry::Occupied(entry) => entry.into_mut().downcast_mut::<T>().expect(&format!(
-                "Could not downcast metadata value to requested type '{}'",
-                core::any::type_name::<T>()
-            )),
+            Entry::Occupied(entry) => entry.into_mut().downcast_mut::<T>().unwrap_or_else(|| {
+                panic!(
+                    "Could not downcast metadata value to requested type '{}'",
+                    core::any::type_name::<T>()
+                )
+            }),
             Entry::Vacant(entry) => {
                 let value = default();
                 entry.insert(Box::new(value)).downcast_mut::<T>().unwrap()
@@ -265,16 +267,30 @@ impl PipelineConfig {
     pub fn source_type(&self) -> &str {
         &self.source.stage_type
     }
+
+    pub fn processor_stages(&self) -> &[StageConfig] {
+        &self.stages
+    }
+
+    pub fn source_stage(&self) -> &StageConfig {
+        &self.source
+    }
+
+    pub fn sink_stage(&self) -> &StageConfig {
+        &self.sink
+    }
 }
 
 #[derive(Deserialize, Debug)]
-struct StageConfig {
-    #[allow(unused)]
-    name: Option<String>,
-    stage_type: String,
+pub struct StageConfig {
+    pub name: Option<String>,
+    pub stage_type: String,
+    #[serde(default)]
+    pub dump: bool,
+    pub replay: Option<String>,
 
     #[serde(flatten)]
-    params: Option<Value>,
+    pub params: Option<Value>,
 }
 
 pub struct Pipeline {
@@ -358,6 +374,24 @@ macro_rules! _register_vyd_stage_impl {
 }
 
 pub fn build_pipeline(config: &PipelineConfig) -> Result<Pipeline, VydError> {
+    if config
+        .stages
+        .iter()
+        .any(|stage| stage.dump || stage.replay.is_some())
+    {
+        return Err(VydError::GeneralPluginError(
+            "stage dump/replay requires the vyd PipelineBuilder".into(),
+        ));
+    }
+    build_pipeline_with_processor_resolver(config, |_, _| Ok(None))
+}
+
+/// Build a graph while allowing the application facade to substitute a
+/// processor (for example, a replay reader) before its normal constructor runs.
+pub fn build_pipeline_with_processor_resolver(
+    config: &PipelineConfig,
+    mut resolve: impl FnMut(usize, &StageConfig) -> Result<Option<Box<dyn FrameProcessor>>, VydError>,
+) -> Result<Pipeline, VydError> {
     tracing::trace!(?config, "Building pipeline");
 
     // Create specific factory functions for each trait type
@@ -448,11 +482,21 @@ pub fn build_pipeline(config: &PipelineConfig) -> Result<Pipeline, VydError> {
     let sink = find_sink_factory(&config.sink.stage_type, config.sink.params.as_ref())?;
 
     let mut stages: Vec<FrameProcessorWrapper> = Vec::new();
-    for stage in &config.stages {
-        stages.push(find_processor_factory(
-            &stage.stage_type,
-            stage.params.as_ref(),
-        )?);
+    for (index, stage) in config.stages.iter().enumerate() {
+        if let Some(inner) = resolve(index, stage)? {
+            let registered = inventory::iter::<&dyn StageFactory>()
+                .find(|factory| factory.stage_type() == stage.stage_type)
+                .ok_or_else(|| VydError::UnknownStage {
+                    kind: "processor",
+                    stage_type: stage.stage_type.clone(),
+                })?;
+            stages.push(FrameProcessorWrapper::new(inner, registered.stage_type()));
+        } else {
+            stages.push(find_processor_factory(
+                &stage.stage_type,
+                stage.params.as_ref(),
+            )?);
+        }
     }
 
     Ok(Pipeline {

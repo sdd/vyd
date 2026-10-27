@@ -722,7 +722,7 @@ mod tests {
         assert!(pool.get_slot_index(std::ptr::null()).is_none());
 
         // Random pointer not from our pool
-        let random_vec = vec![0u8; 100];
+        let random_vec = [0u8; 100];
         assert!(pool.get_slot_index(random_vec.as_ptr()).is_none());
 
         // Pointer before our arena (should be impossible but let's test)

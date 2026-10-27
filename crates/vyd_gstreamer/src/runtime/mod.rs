@@ -62,7 +62,7 @@ impl RuntimeState {
             return Ok(None);
         };
         // A source may have been blocked when cancellation was requested.
-        if !self.stats.is_running() {
+        if self.stats.cancellation_token().is_cancelled() {
             return Ok(None);
         }
         let started = Instant::now();
@@ -79,7 +79,7 @@ impl RuntimeState {
         pad: &gst::Pad,
         buffer: &gst::BufferRef,
     ) -> Result<Option<gst::Buffer>, VydError> {
-        if !self.stats.is_running() {
+        if self.stats.cancellation_token().is_cancelled() {
             return Ok(None);
         }
         let source = self
@@ -126,7 +126,7 @@ impl RuntimeState {
         let transfer = session.gpu_transfer().map_err(error)?.clone();
         let wait = WaitPolicy::Timeout(GPU_BOUNDARY_WAIT);
         for index in start..end {
-            if !self.stats.is_running() {
+            if self.stats.cancellation_token().is_cancelled() {
                 return Ok(None);
             }
             let caps::ProcessorSelection::Gpu { input, output } = self.selections[index] else {
@@ -207,7 +207,7 @@ impl RuntimeState {
     }
 
     fn sink(&mut self, pad: &gst::Pad, buffer: &gst::BufferRef) -> Result<(), VydError> {
-        if !self.stats.is_running() {
+        if self.stats.cancellation_token().is_cancelled() {
             return Ok(());
         }
         let source = self
@@ -246,14 +246,19 @@ fn invoke<T>(
     work(&mut state).map_err(|failure| {
         tracing::error!(?failure, "Rust stage adapter failed");
         state.failure = Some(failure);
-        state.stats.stop();
+        state.stats.cancellation_token().cancel();
         gst::FlowError::Error
     })
 }
 
 enum Progress {
     Finishing,
-    Done(Result<PipelineContext, VydError>),
+    Done(Result<RuntimeRun, VydError>),
+}
+
+pub struct RuntimeRun {
+    pub context: PipelineContext,
+    pub end_of_stream: bool,
 }
 
 /// Run existing Rust stages as a serial GST source → processors → sink graph.
@@ -303,6 +308,21 @@ pub fn run_pipeline_with_gstreamer_nodes(
     run_pipeline_with_native_nodes(context, pipeline, stats, nodes)
 }
 
+pub fn run_pipeline_with_gstreamer_nodes_outcome(
+    context: PipelineContext,
+    pipeline: Pipeline,
+    stats: Option<Arc<PipelineStatistics>>,
+    nodes: Vec<NativeNode>,
+) -> Result<RuntimeRun, VydError> {
+    run_pipeline_with_native_nodes_outcome_and_options(
+        context,
+        pipeline,
+        stats,
+        nodes,
+        RuntimeOptions::default(),
+    )
+}
+
 pub fn run_pipeline_with_native_nodes_and_options(
     context: PipelineContext,
     pipeline: Pipeline,
@@ -310,6 +330,17 @@ pub fn run_pipeline_with_native_nodes_and_options(
     nodes: Vec<NativeNode>,
     options: RuntimeOptions,
 ) -> Result<PipelineContext, VydError> {
+    run_pipeline_with_native_nodes_outcome_and_options(context, pipeline, stats, nodes, options)
+        .map(|run| run.context)
+}
+
+fn run_pipeline_with_native_nodes_outcome_and_options(
+    context: PipelineContext,
+    pipeline: Pipeline,
+    stats: Option<Arc<PipelineStatistics>>,
+    nodes: Vec<NativeNode>,
+    options: RuntimeOptions,
+) -> Result<RuntimeRun, VydError> {
     crate::initialize_gstreamer_tracing().map_err(error)?;
 
     transport::register();
@@ -327,7 +358,7 @@ pub fn run_pipeline_with_native_nodes_and_options(
         .map_err(error)?;
     let mut closing: Option<Instant> = None;
     loop {
-        if !stats.is_running() {
+        if stats.cancellation_token().is_cancelled() {
             closing.get_or_insert_with(Instant::now);
         }
         let wait = closing.map_or(Duration::from_millis(20), |since| {
@@ -342,12 +373,12 @@ pub fn run_pipeline_with_native_nodes_and_options(
                 closing.get_or_insert_with(Instant::now);
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(error("runtime worker exited without a result"))
+                return Err(error("runtime worker exited without a result"));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         if closing.is_some_and(|since| since.elapsed() >= options.shutdown_timeout) {
-            stats.stop();
+            stats.cancellation_token().cancel();
             return Err(VydError::ShutdownTimeout {
                 timeout: options.shutdown_timeout,
             });
@@ -361,18 +392,24 @@ fn run_worker(
     stats: Arc<PipelineStatistics>,
     nodes: Vec<NativeNode>,
     progress: &mpsc::Sender<Progress>,
-) -> Result<PipelineContext, VydError> {
+) -> Result<RuntimeRun, VydError> {
     let mut session = PipelineSession::new(context, pipeline, stats.clone());
     if let Err(failure) = session.start() {
         let _ = progress.send(Progress::Finishing);
-        return session.finish(Err(failure));
+        return session.finish(Err(failure)).map(|context| RuntimeRun {
+            context,
+            end_of_stream: false,
+        });
     }
     let count = session.processor_count();
     let mut native = match native::place(nodes, count) {
         Ok(nodes) => nodes,
         Err(failure) => {
             let _ = progress.send(Progress::Finishing);
-            return session.finish(Err(failure));
+            return session.finish(Err(failure)).map(|context| RuntimeRun {
+                context,
+                end_of_stream: false,
+            });
         }
     };
     let native_boundaries = native
@@ -387,7 +424,10 @@ fn run_worker(
         Ok(caps) => caps,
         Err(failure) => {
             let _ = progress.send(Progress::Finishing);
-            return session.finish(Err(failure));
+            return session.finish(Err(failure)).map(|context| RuntimeRun {
+                context,
+                end_of_stream: false,
+            });
         }
     };
     debug_assert_eq!(caps.selections.len(), count);
@@ -399,7 +439,11 @@ fn run_worker(
                 if dimensions.is_some_and(|previous| previous != geometry.input) {
                     let _ = progress.send(Progress::Finishing);
                     return session
-                        .finish(Err(error("adjacent native geometry contracts disagree")));
+                        .finish(Err(error("adjacent native geometry contracts disagree")))
+                        .map(|context| RuntimeRun {
+                            context,
+                            end_of_stream: false,
+                        });
                 }
                 dimensions = Some(geometry.output);
             }
@@ -477,7 +521,7 @@ fn run_worker(
         graph.set_state(gst::State::Playing).map_err(error)?;
         let bus = graph.bus().ok_or_else(|| error("pipeline has no bus"))?;
         loop {
-            if !stats.is_running() {
+            if stats.cancellation_token().is_cancelled() {
                 bridge::abort(&bridges);
                 break;
             }
@@ -521,7 +565,12 @@ fn run_worker(
         .or(bridge_failure);
     let session = state.session.take().unwrap();
     drop(state);
-    session.finish(failure.map_or(Ok(()), Err))
+    session
+        .finish(failure.map_or(Ok(()), Err))
+        .map(|context| RuntimeRun {
+            context,
+            end_of_stream: normal_eos,
+        })
 }
 
 pub fn run_pipeline_with_config_file_path(

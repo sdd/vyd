@@ -63,10 +63,6 @@ impl FrameBuffer {
         *state_sender = Some(sender);
     }
 
-    pub fn write_frame(&self, frame_data: &[u8]) -> Result<(), &'static str> {
-        self.write_frame_with_timing(frame_data, None)
-    }
-
     pub fn write_frame_with_timing(
         &self,
         frame_data: &[u8],
@@ -173,7 +169,7 @@ impl FrameBuffer {
         let buffer_len = buffer.len();
         let frame = buffer.pop_front();
 
-        if let Some(_) = frame {
+        if frame.is_some() {
             let new_buffer_len = buffer_len - 1;
 
             // Release buffer lock before sending message

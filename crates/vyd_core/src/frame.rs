@@ -456,7 +456,7 @@ impl CpuStorage {
                 tracing::trace!("Shared storage requires one heap copy for owned access");
                 StatsContext::record_memory_operation(MemoryOperation::CpuCopy(data_len));
                 StatsContext::record_memory_operation(MemoryOperation::CpuAllocation(data_len));
-                let vec = (&**shared).to_vec();
+                let vec = shared.to_vec();
                 Self {
                     inner: StorageInner::Owned(Arc::new(vec)),
                     version: new_storage_version(),
@@ -524,7 +524,7 @@ impl Deref for CpuStorage {
     fn deref(&self) -> &Self::Target {
         match &self.inner {
             StorageInner::Owned(v) => v.as_slice(),
-            StorageInner::Shared(shared) => &**shared,
+            StorageInner::Shared(shared) => shared,
         }
     }
 }
@@ -579,7 +579,7 @@ impl Deref for SharedVec {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        &*self.inner
+        &self.inner
     }
 }
 

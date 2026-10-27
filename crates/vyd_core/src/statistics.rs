@@ -1,8 +1,9 @@
+use crate::CancellationToken;
 use crate::frame::PixelFormat;
 use dashmap::DashMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -103,6 +104,8 @@ struct FrameOperationKey {
     kind: FrameOperationKind,
     owner: Option<ResourceOwnerId>,
 }
+
+type FrameOperationMap = DashMap<FrameOperationKey, Arc<Mutex<FrameOperationSnapshot>>>;
 
 /// An attempted operation. Dropping it without `complete` records failure,
 /// including early validation errors, cancellation, and unwinding. A caller
@@ -318,12 +321,11 @@ pub struct PipelineStatistics {
     pub frame_count: Arc<AtomicU64>,
     pub total_processing_time_us: Arc<AtomicU64>,
     pub stage_timings: Arc<DashMap<String, StageTimingStats>>,
-    pub is_running: Arc<AtomicBool>,
+    cancellation: CancellationToken,
 
     pub stage_processing_types: Arc<DashMap<String, ProcessingType>>,
     pub memory_operations: Arc<DashMap<String, Arc<AtomicU64>>>,
-    frame_operations:
-        Arc<DashMap<String, Arc<DashMap<FrameOperationKey, Arc<Mutex<FrameOperationSnapshot>>>>>>,
+    frame_operations: Arc<DashMap<String, Arc<FrameOperationMap>>>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -414,7 +416,7 @@ impl PipelineStatistics {
             frame_count: Arc::new(AtomicU64::new(0)),
             total_processing_time_us: Arc::new(AtomicU64::new(0)),
             stage_timings: Arc::new(DashMap::new()),
-            is_running: Arc::new(AtomicBool::new(true)),
+            cancellation: CancellationToken::new(),
             stage_processing_types: Arc::new(DashMap::new()),
             memory_operations: Arc::new(DashMap::new()),
             frame_operations: Arc::new(DashMap::new()),
@@ -523,16 +525,22 @@ impl PipelineStatistics {
         let stats = self
             .stage_timings
             .entry(stage_name.to_string())
-            .or_insert_with(StageTimingStats::new);
+            .or_default();
         stats.record_timing(timing_us);
     }
 
-    pub fn stop(&self) {
-        self.is_running.store(false, Ordering::Relaxed);
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.clone()
     }
 
+    #[deprecated(note = "request cancellation through Pipeline::cancellation_token")]
+    pub fn stop(&self) {
+        self.cancellation.cancel();
+    }
+
+    #[deprecated(note = "query the pipeline cancellation token")]
     pub fn is_running(&self) -> bool {
-        self.is_running.load(Ordering::Relaxed)
+        !self.cancellation.is_cancelled()
     }
 
     /// Extract the unqualified name from a fully qualified stage name
@@ -906,7 +914,7 @@ impl PipelineStatistics {
 static GLOBAL_STATS: OnceLock<Arc<Mutex<Option<Arc<PipelineStatistics>>>>> = OnceLock::new();
 
 std::thread_local! {
-    static CURRENT_STAGE: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    static CURRENT_STAGE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     static CURRENT_CONTEXT: std::cell::RefCell<Option<StatsContext>> = const { std::cell::RefCell::new(None) };
 }
 

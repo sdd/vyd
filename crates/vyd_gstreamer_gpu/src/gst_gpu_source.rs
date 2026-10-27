@@ -413,7 +413,7 @@ impl FrameSource for GstGpuSource {
             PlayState::Playing => loop {
                 if ctx
                     .try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics")
-                    .is_ok_and(|stats| !stats.is_running())
+                    .is_ok_and(|stats| stats.cancellation_token().is_cancelled())
                 {
                     return None;
                 }

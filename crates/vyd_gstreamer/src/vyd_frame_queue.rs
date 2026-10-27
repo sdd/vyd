@@ -181,7 +181,7 @@ impl VydFrameQueue {
         let buffer_len = buffer.len();
         let frame_with_timing = buffer.pop_front();
 
-        if let Some(_) = frame_with_timing {
+        if frame_with_timing.is_some() {
             let new_buffer_len = buffer_len - 1;
 
             // Release buffer lock before sending message

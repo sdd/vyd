@@ -9,6 +9,9 @@ pub struct Config {
     /// Path to the configuration TOML file
     #[arg(short, long = "config", default_value = "examples/basic.toml")]
     pub config_path: PathBuf,
+
+    #[command(flatten)]
+    pub run: vyd::cli::RunArgs,
 }
 
 impl Config {

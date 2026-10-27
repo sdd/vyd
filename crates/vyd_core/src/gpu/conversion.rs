@@ -42,8 +42,8 @@ fn remaining(wait: WaitPolicy, started: Instant) -> WaitPolicy {
 
 fn dispatch_extent(width: u32, height: u32) -> [u32; 3] {
     [
-        width / 8 + u32::from(width % 8 != 0),
-        height / 8 + u32::from(height % 8 != 0),
+        width / 8 + u32::from(!width.is_multiple_of(8)),
+        height / 8 + u32::from(!height.is_multiple_of(8)),
         1,
     ]
 }

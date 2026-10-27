@@ -1,6 +1,6 @@
 # Vyd
 
-Vyd provides a reusable Rust video processing pipeline. A `FrameSource` produces frames, `FrameProcessor` stages transform or skip them, and a `FrameSink` consumes them. Stages can be registered and assembled from TOML; the library also provides frame storage, timing statistics, and optional Parquet dumps.
+Vyd provides a reusable Rust video processing pipeline. A `FrameSource` produces frames, `FrameProcessor` stages transform or skip them, and a `FrameSink` consumes them. Stages can be registered and assembled from TOML; the library also provides frame storage, timing statistics, and optional Vortex recordings.
 
 ## Run the example
 
@@ -19,9 +19,9 @@ cargo test --workspace --all-features
 
 The workspace contains:
 
-- `vyd-core`: pipeline orchestration, lifecycle observers, stage interfaces, managed Luma8 and full-range NV12 CPU frames, optional wgpu frame access, and statistics. It has no GStreamer or Parquet dependency.
+- `vyd-core`: pipeline orchestration, lifecycle observers, stage interfaces, managed Luma8 and full-range NV12 CPU frames, optional wgpu frame access, and statistics. It has no GStreamer or Vortex dependency.
 - `vyd`: application-facing builder and owned pipeline. It combines the core, GStreamer runtime, and optional telemetry setup.
-- `vyd-telemetry`: run metadata, statistics export, and Parquet dumping.
+- `vyd-telemetry`: run metadata, statistics export, and per-stage Vortex recording and replay.
 - `vyd-gstreamer`: generic file and RTSP frame sources with pooled CPU buffers.
 - `vyd-gstreamer-gpu`: experimental GPU buffer path. Its current source still assumes 1920×1080 Luma8 frames.
 - `vyd-main`: example CLI.
@@ -35,19 +35,38 @@ guidelines behind Vyd.
 
 ## Run telemetry
 
-Applications can construct a run with `vyd::PipelineBuilder::from_config_file(path)`, optionally call `with_dump_dir(directory)`, then call `build()`. The returned `vyd::Pipeline` exposes `context_mut()` and a cloneable `statistics()` handle before `run()` consumes it. The builder configures a GPU when any configured processor has `gpu = true`; this temporary convention does not depend on processor names. A build without `gpu-wgpu` reports that feature as required.
+Applications can construct a run with `vyd::PipelineBuilder::from_config_file(path)`, optionally override its recording options, then call `build()?`. The returned `vyd::Pipeline` exposes `context_mut()`, a cloneable `statistics()` handle, and `cancellation_token()` before `run()` consumes it. The builder configures a GPU when any configured processor has `gpu = true`; this temporary convention does not depend on processor names. A build without `gpu-wgpu` reports that feature as required.
 
 ```rust,no_run
 let pipeline = vyd::PipelineBuilder::from_config_file("examples/basic.toml")?
-    .with_dump_dir("./dumps")?
-    .build();
+    .build()?;
 let stats = pipeline.statistics();
+let cancellation = pipeline.cancellation_token();
+// Call cancellation.cancel() from a signal handler to finalize a partial run.
 pipeline.run()?;
 stats.print_final_stats();
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The `vyd-telemetry` crate still offers `DumpManager` for custom `Dumpable` stage data. Its observer flushes writers and writes `run_metadata.json` and `run_statistics.json`, including on pipeline errors. Direct users of `vyd-core` can keep constructing a `PipelineContext` and calling its serial runner without a GStreamer dependency.
+To record a processor, add `dump = true` to its `[[stages]]` section. Recordings default to `./dumps` relative to the working directory, with a generated run name. An optional top-level section selects a stable name and directory:
+
+```toml
+[[stages]]
+stage_type = "my_crate::FeatureProcessor"
+dump = true
+
+[recording]
+dump_dir = "./dumps"
+run_name = "feature-test"
+```
+
+Relative `recording.dump_dir` values resolve from the working directory. `--dump-dir` and `--run-name` override their corresponding TOML values independently. `--replace-run` replaces the named run only after the new run completes or is cancelled cleanly; it accepts a run name from TOML or the CLI. Each recorded stage writes its own `.vortex` file under `dump-dir/NAME`; the same directory contains a versioned `manifest.json` and `run_statistics.json`. A failed or unfinished run remains in `.staging` and cannot be replayed. A clean cancellation publishes a finalized prefix.
+
+After the pipeline statistics, the example CLI prints the published directory and each stage file's frame count and size. Library callers can inspect the same data in `Pipeline::run_with_outcome()?.recording`.
+
+The processor crate registers a `TypedStageCodec` for its stage type. Its row struct becomes separate Vortex columns for each named output. Every row also carries frame index, timestamps, dimensions, and continue/skip disposition. To replay, replace `dump = true` with `replay = "dumps/NAME/00-FeatureProcessor.vortex"` (relative paths resolve from the config file). Replay substitutes the processor, validates the finalized manifest and source file metadata, and checks each incoming frame's identity and geometry. Recording and replay currently support processor metadata only. Direct users of `vyd-core` can keep constructing a `PipelineContext` and calling its serial runner without a GStreamer dependency.
+
+The writer has a one-chunk queue and a 64 MiB in-flight byte budget. One frame larger than the budget is allowed through alone.
 
 Pipelines that retain many CPU frames can set pool limits in the same TOML file:
 
