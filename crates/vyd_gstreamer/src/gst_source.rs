@@ -94,6 +94,7 @@ impl GstSource {
         };
 
         let config: Config = params
+            .clone()
             .try_into()
             .map_err(|e| GstSourceError::ConfigError(format!("Failed to parse config: {}", e)))?;
 
@@ -113,7 +114,7 @@ impl GstSource {
 
         let pool = if config.zc_enabled {
             Some(
-                ManagedFramePool::new(Some(config.buffer_pool_slot_count), None)
+                ManagedFramePool::new(Some(config.buffer_pool_slot_count.get()), None)
                     .map_err(|error| GstSourceError::ConfigError(error.to_string()))?,
             )
         } else {

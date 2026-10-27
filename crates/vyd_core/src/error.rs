@@ -2,6 +2,10 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum VydError {
+    /// Recording or replay failure, retaining its context and original source.
+    #[error("Pipeline persistence error: {0}")]
+    PersistenceError(#[from] anyhow::Error),
+
     #[error(transparent)]
     Frame(#[from] crate::frame::FrameError),
     #[cfg(feature = "gpu-wgpu")]

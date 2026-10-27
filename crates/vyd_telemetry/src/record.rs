@@ -1,4 +1,5 @@
 use crate::StageCodec;
+use anyhow::{Context, anyhow};
 use arrow_array::RecordBatch;
 use arrow_schema::{FieldRef, Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
@@ -6,10 +7,6 @@ use serde_arrow::schema::{SchemaLike, TracingOptions};
 use std::sync::Arc;
 use std::time::Duration;
 use vyd_core::{FrameContext, FrameProcessorResult, VydError};
-
-fn record_error(error: impl std::fmt::Display) -> VydError {
-    VydError::GeneralPluginError(format!("stage recording: {error}"))
-}
 
 #[derive(Deserialize, Serialize)]
 struct FrameEnvelope {
@@ -23,9 +20,10 @@ struct FrameEnvelope {
 }
 
 fn nanos(value: Option<Duration>) -> Result<Option<u64>, VydError> {
-    value
-        .map(|value| u64::try_from(value.as_nanos()).map_err(record_error))
+    Ok(value
+        .map(|value| u64::try_from(value.as_nanos()))
         .transpose()
+        .context("recording timestamp exceeds u64 nanoseconds")?)
 }
 
 impl FrameEnvelope {
@@ -35,7 +33,8 @@ impl FrameEnvelope {
     ) -> Result<Self, VydError> {
         let (width, height) = frame.frame.dimensions();
         Ok(Self {
-            frame_index: u64::try_from(frame.frame_index).map_err(record_error)?,
+            frame_index: u64::try_from(frame.frame_index)
+                .context("recording frame index exceeds u64")?,
             presentation_timestamp_ns: nanos(frame.timing.presentation_timestamp)?,
             decode_timestamp_ns: nanos(frame.timing.decode_timestamp)?,
             duration_ns: nanos(frame.timing.duration)?,
@@ -57,7 +56,7 @@ impl FrameEnvelope {
             || self.duration_ns != expected.duration_ns
             || (self.width, self.height) != (expected.width, expected.height)
         {
-            return Err(record_error(format!(
+            return Err(VydError::PersistenceError(anyhow!(
                 "frame identity/timing/geometry mismatch at frame {}",
                 frame.frame_index
             )));
@@ -65,13 +64,18 @@ impl FrameEnvelope {
         match self.disposition.as_str() {
             "continue" => Ok(FrameProcessorResult::Continue),
             "skip" => Ok(FrameProcessorResult::Skip),
-            other => Err(record_error(format!("unknown disposition {other}"))),
+            other => Err(VydError::PersistenceError(anyhow!(
+                "unknown disposition {other}"
+            ))),
         }
     }
 }
 
 fn envelope_fields() -> Result<Vec<FieldRef>, VydError> {
-    Vec::<FieldRef>::from_type::<FrameEnvelope>(TracingOptions::default()).map_err(record_error)
+    Ok(
+        Vec::<FieldRef>::from_type::<FrameEnvelope>(TracingOptions::default())
+            .context("derive recording frame schema")?,
+    )
 }
 
 pub fn schema_for(codec: &dyn StageCodec) -> Result<SchemaRef, VydError> {
@@ -82,7 +86,7 @@ pub fn schema_for(codec: &dyn StageCodec) -> Result<SchemaRef, VydError> {
             .iter()
             .any(|existing| existing.name() == field.name())
         {
-            return Err(record_error(format!(
+            return Err(VydError::PersistenceError(anyhow!(
                 "duplicate output field {}",
                 field.name()
             )));
@@ -102,14 +106,16 @@ pub fn capture(
         fields.as_slice(),
         &[FrameEnvelope::from_frame(frame, disposition)?],
     )
-    .map_err(record_error)?;
+    .context("serialize recording frame metadata")?;
     let output = codec.capture_batch(frame, disposition)?;
     if output.num_rows() != 1 {
-        return Err(record_error("codec must emit exactly one row per frame"));
+        return Err(VydError::PersistenceError(anyhow!(
+            "codec must emit exactly one row per frame"
+        )));
     }
     let mut arrays = envelope.columns().to_vec();
     arrays.extend_from_slice(output.columns());
-    RecordBatch::try_new(schema_for(codec)?, arrays).map_err(record_error)
+    Ok(RecordBatch::try_new(schema_for(codec)?, arrays).context("assemble recording frame row")?)
 }
 
 pub fn restore(
@@ -119,17 +125,19 @@ pub fn restore(
 ) -> Result<FrameProcessorResult, VydError> {
     let prefix = envelope_fields()?.len();
     if row.num_rows() != 1 || row.num_columns() != prefix + codec.fields()?.len() {
-        return Err(record_error("replay row has the wrong shape"));
+        return Err(VydError::PersistenceError(anyhow!(
+            "replay row has the wrong shape"
+        )));
     }
     let common = row
         .project(&(0..prefix).collect::<Vec<_>>())
-        .map_err(record_error)?;
+        .context("project replay frame metadata")?;
     let mut envelopes: Vec<FrameEnvelope> =
-        serde_arrow::from_record_batch(&common).map_err(record_error)?;
+        serde_arrow::from_record_batch(&common).context("deserialize replay frame metadata")?;
     let disposition = envelopes.remove(0).verify(frame)?;
     let output = row
         .project(&(prefix..row.num_columns()).collect::<Vec<_>>())
-        .map_err(record_error)?;
+        .context("project replay stage output")?;
     codec.restore_batch(frame, disposition, &output)?;
     Ok(disposition)
 }

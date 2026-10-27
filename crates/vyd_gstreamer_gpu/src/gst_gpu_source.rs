@@ -92,6 +92,7 @@ impl GstGpuSource {
         };
 
         let config: Config = params
+            .clone()
             .try_into()
             .map_err(|e| GstSourceError::ConfigError(format!("Failed to parse config: {}", e)))?;
 

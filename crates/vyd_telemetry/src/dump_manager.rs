@@ -154,7 +154,7 @@ impl DumpManager {
             .truncate(false)
             .open(lock_path)?;
         lock.try_lock_exclusive()
-            .map_err(|error| anyhow!("run {name:?} is already in use: {error}"))?;
+            .with_context(|| format!("run {name:?} is already in use"))?;
         let target = options.root.join(&name);
         recover_backup(&options.root, &name, &target)?;
         if target.exists() && !options.replace {
@@ -323,7 +323,8 @@ impl DumpManager {
             fs::rename(&inner.target, &backup)?;
             if let Err(error) = fs::rename(&inner.staging, &inner.target) {
                 let rollback = fs::rename(&backup, &inner.target);
-                return Err(anyhow!("publish failed: {error}; rollback: {rollback:?}"));
+                return Err(error)
+                    .with_context(|| format!("publish failed; rollback: {rollback:?}"));
             }
             if let Err(error) = fs::remove_dir_all(backup) {
                 tracing::warn!(?error, "Published run but could not remove its backup");
@@ -409,7 +410,7 @@ impl PipelineObserver for DumpObserver {
         let statistics = context
             .try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics")
             .map(|stats| stats.snapshot())
-            .map_err(|error| anyhow!(error.to_string()))
+            .map_err(anyhow::Error::new)
             .and_then(|snapshot| {
                 let staging = self
                     .0
@@ -424,8 +425,6 @@ impl PipelineObserver for DumpObserver {
                 )?;
                 Ok(())
             });
-        closed.and(statistics).map_err(|error| {
-            VydError::GeneralPluginError(format!("telemetry finalization: {error}"))
-        })
+        Ok(closed.and(statistics).context("finalize telemetry")?)
     }
 }

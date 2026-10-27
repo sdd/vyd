@@ -4,6 +4,34 @@ use serde_arrow::schema::{SchemaLike, TracingOptions};
 use std::sync::Arc;
 use vyd_telemetry::{VortexReader, VortexWriter};
 
+#[test]
+fn writer_failure_preserves_io_source_across_worker_and_pipeline_errors() {
+    let path = std::env::temp_dir()
+        .join(format!("vyd-missing-{}", rand::random::<u64>()))
+        .join("frames.vortex");
+    let fields = Vec::<FieldRef>::from_type::<FrameRow>(TracingOptions::default()).unwrap();
+    let mut writer = VortexWriter::new(path, Arc::new(Schema::new(fields))).unwrap();
+    let error: vyd_core::VydError = writer.close().unwrap_err().into();
+    assert!(std::error::Error::source(&error).is_some());
+    let vyd_core::VydError::PersistenceError(source) = error else {
+        panic!("expected persistence error");
+    };
+    assert_eq!(
+        source.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::NotFound
+    );
+}
+
+#[test]
+fn reader_failure_preserves_source_chain_across_worker() {
+    let path = std::env::temp_dir().join(format!("vyd-missing-{}.vortex", rand::random::<u64>()));
+    let reader = VortexReader::new(&path).unwrap();
+    let error = reader.next_row().unwrap_err();
+    assert!(error.to_string().contains(&path.display().to_string()));
+    assert!(error.chain().nth(1).is_some());
+    reader.close().unwrap();
+}
+
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
 struct Feature {
     x: f32,
