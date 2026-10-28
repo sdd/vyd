@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/sdd/vyd/compare/vyd-main/0.2.2...vyd-main/0.3.0) - 2026-10-28
+
+### Added
+
+- add frame capture timing
+
+### Fixed
+
+- [**breaking**] widen relative frame timing to u64
+- [**breaking**] handle capture clock discontinuities and review feedback
+
 ## [0.2.2](https://github.com/sdd/vyd/compare/vyd-main/0.2.1...vyd-main/0.2.2) - 2026-10-28
 
 ### Added

@@ -4465,7 +4465,7 @@ dependencies = [
 
 [[package]]
 name = "vyd"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4480,7 +4480,7 @@ dependencies = [
 
 [[package]]
 name = "vyd-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4500,7 +4500,7 @@ dependencies = [
 
 [[package]]
 name = "vyd-gstreamer"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4522,7 +4522,7 @@ dependencies = [
 
 [[package]]
 name = "vyd-gstreamer-gpu"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4542,7 +4542,7 @@ dependencies = [
 
 [[package]]
 name = "vyd-main"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "clap",
  "ctrlc",
@@ -4553,7 +4553,7 @@ dependencies = [
 
 [[package]]
 name = "vyd-telemetry"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arrow-array",
