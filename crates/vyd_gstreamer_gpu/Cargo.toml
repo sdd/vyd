@@ -1,6 +1,6 @@
 [package]
 name = "vyd-gstreamer-gpu"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors.workspace = true
 description = "Experimental GStreamer GPU buffer integration for Vyd"
@@ -12,7 +12,7 @@ documentation = "https://docs.rs/vyd-gstreamer-gpu"
 [dependencies]
 serde = { workspace = true }
 vyd-core = { workspace = true }
-vyd_gstreamer = { package = "vyd-gstreamer", path = "../vyd_gstreamer", version = "0.2.1" }
+vyd_gstreamer = { package = "vyd-gstreamer", path = "../vyd_gstreamer", version = "0.2.2" }
 bytes = "1"
 gst = { package = "gstreamer", version = "0.21", features = ["v1_20"] }
 gst-base = { package = "gstreamer-base", version = "0.21.2" }
