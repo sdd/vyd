@@ -155,7 +155,7 @@ impl CaptureClock {
         self.next_index = self.next_index.wrapping_add(1);
         context.timing = timing;
         context.frame_capture_ts = capture.or(estimated);
-        context.elapsed_us = self.elapsed.as_micros() as u32;
+        context.elapsed_us = self.elapsed.as_micros() as u64;
         context
     }
 }
@@ -173,7 +173,7 @@ mod tests {
         }
     }
     #[test]
-    fn wrapping_and_dropped_frames_keep_source_time() {
+    fn dropped_frames_keep_source_time_beyond_the_u32_range() {
         let mut clock = CaptureClock::new(false, 0, None);
         let now = Instant::now();
         let utc = SystemTime::UNIX_EPOCH;
@@ -181,8 +181,26 @@ mod tests {
         let _dropped = clock.sample(frame(), pts(u32::MAX as u64), None, now, utc);
         let last = clock.sample(frame(), pts(u32::MAX as u64 + 21), None, now, utc);
         assert_eq!(last.frame_index, 2);
-        assert_eq!(last.us_since(&first), 20);
+        assert_eq!(last.us_since(&first), u32::MAX as u64 + 21);
     }
+    #[test]
+    fn relative_time_wraps_at_u64_boundary() {
+        let mut clock = CaptureClock::new(false, 0, None);
+        clock.elapsed = Duration::from_micros(u64::MAX - 10);
+        let now = Instant::now();
+        let utc = SystemTime::UNIX_EPOCH;
+        let first = clock.sample(frame(), FrameTiming::default(), None, now, utc);
+        let last = clock.sample(
+            frame(),
+            FrameTiming::default(),
+            None,
+            now + Duration::from_micros(30),
+            utc,
+        );
+        assert_eq!(last.elapsed_us, 19);
+        assert_eq!(last.us_since(&first), 30);
+    }
+
     #[test]
     fn offline_pts_ignores_processing_speed_and_latency() {
         let zero = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
@@ -272,7 +290,7 @@ mod tests {
         let first = clock.sample(frame(), pts(0), None, now, utc);
         for time in [40_000, 39_000, 80_000] {
             let next = clock.sample(frame(), pts(time), None, now, utc);
-            assert_eq!(next.us_since(&first), time.max(40_000) as u32);
+            assert_eq!(next.us_since(&first), time.max(40_000));
         }
     }
 

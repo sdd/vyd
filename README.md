@@ -101,9 +101,8 @@ queue drops frames. Consumers see gaps rather than renumbered frames. Processors
 should preserve the context when replacing pixels. Custom sources can use
 `vyd_core::capture_timing::CaptureClock` to assign indices and timing together.
 `frame_capture_ts: Option<SystemTime>` carries capture UTC; `us_since(&previous)`
-returns relative capture microseconds using wrapping subtraction. The private
-32-bit counter wraps every 71.6 minutes, so differences must span less than one
-wrap.
+returns `u64` relative capture microseconds using wrapping subtraction. The private
+64-bit counter wraps after approximately 584,000 years.
 
 Relative timing uses consecutive genuine capture UTC deltas, then media PTS,
 then monotonic ingestion time. Backwards PTS steps up to two frame durations (100 ms when duration is unknown)
@@ -145,6 +144,4 @@ API migration: this change is breaking and must be released as such. `frame_inde
 and its constructor argument are now `u64`. Use `FrameContext::new` rather than
 struct literals, and `CaptureClock` when assigning source timing. Queued frames
 now carry a context and no longer implement `Debug`/`Clone`; contexts contain
-non-cloneable application metadata. The `u32` wrapping interval API is intentional:
-callers needing longer intervals must accumulate successive `us_since` values
-into a wider counter, sampling at least once per wrap.
+non-cloneable application metadata. Relative timing and the `us_since` return value use `u64` microseconds.
