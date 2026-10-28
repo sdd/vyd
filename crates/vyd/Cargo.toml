@@ -1,6 +1,6 @@
 [package]
 name = "vyd"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 authors.workspace = true
 description = "Configured Vyd video pipelines with a GStreamer runtime"
@@ -20,8 +20,8 @@ parse-size = "1.1"
 clap = { workspace = true }
 tracing = { workspace = true }
 vyd-core = { workspace = true }
-vyd-gstreamer = { path = "../vyd_gstreamer", version = "0.2.1" }
-vyd-telemetry = { path = "../vyd_telemetry", version = "0.2.1" }
+vyd-gstreamer = { path = "../vyd_gstreamer", version = "0.2.2" }
+vyd-telemetry = { path = "../vyd_telemetry", version = "0.2.2" }
 toml = { workspace = true }
 
 [lib]

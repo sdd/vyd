@@ -1,6 +1,6 @@
 [package]
 name = "vyd-telemetry"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 authors.workspace = true
 description = "Vortex telemetry and run statistics for Vyd pipelines"
