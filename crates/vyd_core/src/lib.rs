@@ -40,7 +40,7 @@ pub struct FrameTiming {
 
 /// Opaque relative timing retained by transport adapters.
 #[derive(Clone, Copy)]
-pub struct FrameContextTiming(u32);
+pub struct FrameContextTiming(u64);
 
 pub struct FrameContext {
     pub metadata: HashMap<String, Box<dyn Any + Send + Sync>>,
@@ -51,7 +51,7 @@ pub struct FrameContext {
     pub frame_index: u64,
     /// Genuine source capture UTC, or a live-source estimate; unknown for untimed files.
     pub frame_capture_ts: Option<SystemTime>,
-    pub(crate) elapsed_us: u32,
+    pub(crate) elapsed_us: u64,
     pub timing: FrameTiming,
 }
 
@@ -78,8 +78,8 @@ impl FrameContext {
         self.elapsed_us = timing.0;
     }
 
-    /// Relative capture time modulo 2^32 microseconds (about 71.6 minutes).
-    pub fn us_since(&self, previous: &Self) -> u32 {
+    /// Relative capture time modulo 2^64 microseconds (about 584,000 years).
+    pub fn us_since(&self, previous: &Self) -> u64 {
         self.elapsed_us.wrapping_sub(previous.elapsed_us)
     }
 

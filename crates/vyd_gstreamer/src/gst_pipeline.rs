@@ -215,7 +215,7 @@ mod capture_tests {
                     next.frame_capture_ts,
                     Some(UNIX_EPOCH + Duration::from_millis(100_000 + index * 40))
                 );
-                assert_eq!(next.us_since(&first), index as u32 * 40_000);
+                assert_eq!(next.us_since(&first), index * 40_000);
             }
             if pooled {
                 assert_eq!(
