@@ -140,6 +140,16 @@ mod imp {
 
     impl BaseSinkImpl for RingBufferSink {
         fn event(&self, event: gst::Event) -> bool {
+            if matches!(
+                event.view(),
+                gst::EventView::FlushStop(_)
+                    | gst::EventView::StreamStart(_)
+                    | gst::EventView::Segment(_)
+            ) {
+                if let Some(queue) = self.buffer.lock().unwrap().as_ref() {
+                    queue.reset_timing();
+                }
+            }
             if let gst::EventView::Tag(tag) = event.view() {
                 if let Some(utc) = vyd_gstreamer::timing::frame_zero_capture_utc(tag.tag()) {
                     if let Some(queue) = self.buffer.lock().unwrap().as_ref() {
@@ -152,6 +162,58 @@ mod imp {
 
         fn render(&self, buffer: &gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
             self.render(buffer)
+        }
+    }
+}
+
+#[cfg(test)]
+mod clock_event_tests {
+    use super::*;
+    use gst_base::subclass::prelude::BaseSinkImpl;
+    use std::time::Duration;
+    use vyd_core::FrameTiming;
+
+    #[test]
+    fn flush_stream_and_segment_events_rebase_the_clock() {
+        gst::init().unwrap();
+        let segment = gst::FormattedSegment::<gst::ClockTime>::new();
+        for event in [
+            gst::event::FlushStop::new(false),
+            gst::event::StreamStart::new("restart"),
+            gst::event::Segment::new(&segment),
+        ] {
+            let queue = Arc::new(FrameBuffer::new(
+                crate::frame_buffer::FrameInfo {
+                    width: 1,
+                    height: 1,
+                    stride: 1,
+                    timestamp: 0,
+                    frame_size: 1,
+                },
+                4,
+                true,
+            ));
+            let sink = RingBufferSink::new();
+            sink.set_buffer(queue.clone());
+            let write = |us| {
+                let timing = FrameTiming {
+                    presentation_timestamp: Some(Duration::from_micros(us)),
+                    ..Default::default()
+                };
+                queue
+                    .write_frame_with_timing(&[0], None, timing, None)
+                    .unwrap();
+            };
+            write(60_000_000);
+            queue.try_read_frame().unwrap();
+            sink.imp().event(event);
+            write(0);
+            let first = queue.try_read_frame().unwrap().context;
+            write(40_000);
+            let next = queue.try_read_frame().unwrap().context;
+            assert_eq!(first.frame_index, 1);
+            assert_eq!(next.frame_index, 2);
+            assert_eq!(next.us_since(&first), 40_000);
         }
     }
 }

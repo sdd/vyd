@@ -12,6 +12,7 @@ pub struct CaptureClock {
     frame_zero: Option<SystemTime>,
     previous: Option<(Option<SystemTime>, Option<Duration>, Instant)>,
     elapsed: Duration,
+    first_pts: Option<Duration>,
     offsets: VecDeque<SystemTime>,
 }
 
@@ -24,6 +25,7 @@ impl CaptureClock {
             frame_zero,
             previous: None,
             elapsed: Duration::ZERO,
+            first_pts: None,
             offsets: VecDeque::new(),
         }
     }
@@ -32,6 +34,15 @@ impl CaptureClock {
     pub fn set_frame_zero(&mut self, utc: SystemTime) {
         if self.frame_zero.is_none() {
             self.frame_zero = Some(utc);
+        }
+    }
+
+    /// Rebase media clocks after a flush or stream restart without reusing indices
+    /// or resetting the relative timeline. The next interval uses ingestion time.
+    pub fn reset(&mut self) {
+        self.offsets.clear();
+        if let Some((_, _, now)) = self.previous {
+            self.previous = Some((None, None, now));
         }
     }
 
@@ -60,11 +71,32 @@ impl CaptureClock {
         utc: SystemTime,
     ) -> FrameContext {
         let pts = timing.presentation_timestamp;
+        // Two frame durations tolerate ordinary timestamp jitter. Untimed
+        // streams use a conservative 100 ms threshold.
+        let tolerance = timing
+            .duration
+            .filter(|d| !d.is_zero())
+            .unwrap_or(Duration::from_millis(50))
+            .saturating_mul(2);
+        if self
+            .previous
+            .and_then(|(_, old, _)| old)
+            .zip(pts)
+            .is_some_and(|(old, new)| old.saturating_sub(new) > tolerance)
+        {
+            self.reset();
+        }
+        if self.first_pts.is_none() {
+            self.first_pts = pts;
+        }
         if let Some((old_capture, old_pts, old_now)) = self.previous {
-            let delta = capture
+            let media_delta = pts.zip(old_pts).map(|(a, b)| a.saturating_sub(b));
+            let capture_delta = capture
                 .zip(old_capture)
                 .and_then(|(a, b)| a.duration_since(b).ok())
-                .or_else(|| pts.zip(old_pts).map(|(a, b)| a.saturating_sub(b)))
+                .filter(|delta| media_delta.is_none_or(|media| delta.abs_diff(media) <= tolerance));
+            let delta = capture_delta
+                .or(media_delta)
                 .unwrap_or_else(|| now.saturating_duration_since(old_now));
             self.elapsed = self.elapsed.saturating_add(delta);
         }
@@ -112,8 +144,12 @@ impl CaptureClock {
                 utc.checked_sub(self.latency)
             }
         } else {
-            self.frame_zero
-                .and_then(|zero| zero.checked_add(self.elapsed))
+            self.frame_zero.and_then(|zero| {
+                zero.checked_add(
+                    pts.zip(self.first_pts)
+                        .map_or(self.elapsed, |(pts, first)| pts.saturating_sub(first)),
+                )
+            })
         };
         let mut context = FrameContext::new(frame, self.next_index);
         self.next_index = self.next_index.wrapping_add(1);
@@ -237,6 +273,79 @@ mod tests {
         for time in [40_000, 39_000, 80_000] {
             let next = clock.sample(frame(), pts(time), None, now, utc);
             assert_eq!(next.us_since(&first), time.max(40_000) as u32);
+        }
+    }
+
+    #[test]
+    fn pts_restart_rebases_relative_time_and_utc_immediately() {
+        for live in [false, true] {
+            let mut clock = CaptureClock::new(live, 10, None);
+            let now = Instant::now();
+            let utc = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+            let before = clock.sample(frame(), pts(60_000_000), None, now, utc);
+            let reset = clock.sample(
+                frame(),
+                pts(0),
+                None,
+                now + Duration::from_millis(40),
+                utc + Duration::from_millis(40),
+            );
+            let next = clock.sample(
+                frame(),
+                pts(40_000),
+                None,
+                now + Duration::from_millis(80),
+                utc + Duration::from_millis(80),
+            );
+            assert_eq!(reset.us_since(&before), 40_000);
+            assert_eq!(next.us_since(&reset), 40_000);
+            assert_eq!(next.frame_index, 2);
+            if live {
+                assert_eq!(next.frame_capture_ts, Some(utc + Duration::from_millis(70)));
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_reset_preserves_identity_and_uses_monotonic_interval() {
+        let mut clock = CaptureClock::new(true, 0, None);
+        let now = Instant::now();
+        let utc = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let before = clock.sample(frame(), pts(0), Some(utc), now, utc);
+        clock.reset();
+        let after = clock.sample(
+            frame(),
+            pts(10_000_000),
+            Some(utc + Duration::from_secs(10)),
+            now + Duration::from_millis(40),
+            utc + Duration::from_millis(40),
+        );
+        assert_eq!(after.us_since(&before), 40_000);
+        assert_eq!(after.frame_index, 1);
+    }
+
+    #[test]
+    fn sender_clock_steps_in_both_directions_use_pts() {
+        for forward in [false, true] {
+            let mut clock = CaptureClock::new(false, 999, None);
+            let now = Instant::now();
+            let utc = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+            let first = clock.sample(frame(), pts(0), Some(utc), now, utc);
+            let stepped = if forward {
+                utc + Duration::from_secs(5)
+            } else {
+                utc - Duration::from_secs(5)
+            };
+            let next = clock.sample(frame(), pts(40_000), Some(stepped), now, utc);
+            assert_eq!(next.us_since(&first), 40_000);
+            let last = clock.sample(
+                frame(),
+                pts(80_000),
+                Some(stepped + Duration::from_millis(40)),
+                now,
+                utc,
+            );
+            assert_eq!(last.us_since(&next), 40_000);
         }
     }
 

@@ -40,7 +40,10 @@ fn build_generic_pipeline(
     for element in pipeline.iterate_elements().into_iter().flatten() {
         if element
             .find_property("add-reference-timestamp-meta")
-            .is_some()
+            .is_some_and(|p| {
+                p.value_type() == bool::static_type()
+                    && p.flags().contains(gst::glib::ParamFlags::WRITABLE)
+            })
         {
             element.set_property("add-reference-timestamp-meta", true);
         }
@@ -127,4 +130,102 @@ fn build_generic_pipeline(
     });
 
     Ok(pipeline)
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use crate::vyd_frame_queue::FrameInfo;
+    use std::time::{Duration, UNIX_EPOCH};
+    use vyd_core::statistics::PipelineStatistics;
+
+    #[test]
+    fn capture_meta_survives_decode_convert_and_source_handoff() {
+        gst::init().unwrap();
+        for (description, pooled) in [
+            ("videotestsrc name=capture num-buffers=3 ! video/x-raw,format=GRAY8,width=8,height=8,framerate=25/1 ! decodebin", false),
+            ("videotestsrc name=capture num-buffers=3 ! video/x-raw,format=GRAY8,width=8,height=8,framerate=25/1 ! decodebin", true),
+            ("videotestsrc num-buffers=3 ! video/x-raw,format=I420,width=16,height=16,framerate=25/1 ! theoraenc name=capture ! decodebin", false),
+            ("videotestsrc num-buffers=3 ! video/x-raw,format=I420,width=16,height=16,framerate=25/1 ! theoraenc name=capture ! decodebin", true),
+        ] {
+            let queue = Arc::new(VydFrameQueue::new(
+                FrameInfo {
+                    width: 8,
+                    height: 8,
+                    stride: 8,
+                    timestamp: 0,
+                    frame_size: 64,
+                },
+                10,
+                false,
+            ));
+            let pool = pooled.then(|| ManagedFramePool::new(Some(8), None).unwrap());
+            let pipeline = build_generic_pipeline(
+                description, queue.clone(), pool,
+            ).unwrap();
+            let stats = Arc::new(PipelineStatistics::new());
+            let sink = pipeline
+                .iterate_elements()
+                .into_iter()
+                .flatten()
+                .find_map(|e| e.downcast::<VydGstSink>().ok())
+                .unwrap();
+            sink.set_statistics(stats.clone());
+            pipeline
+                .by_name("capture")
+                .unwrap()
+                .static_pad("src")
+                .unwrap()
+                .add_probe(gst::PadProbeType::BUFFER, |_, info| {
+                    if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
+                        let buffer = buffer.make_mut();
+                        let Some(pts) = buffer.pts() else { return gst::PadProbeReturn::Ok; };
+                        let utc = gst::ClockTime::from_seconds(100) + pts;
+                        gst::ReferenceTimestampMeta::add(
+                            buffer,
+                            &gst::Caps::builder("timestamp/x-unix").build(),
+                            utc,
+                            None,
+                        );
+                    }
+                    gst::PadProbeReturn::Ok
+                });
+            pipeline.set_state(gst::State::Playing).unwrap();
+            let message = pipeline.bus().unwrap().timed_pop_filtered(
+                gst::ClockTime::from_seconds(10),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            );
+            pipeline.set_state(gst::State::Null).unwrap();
+            assert!(
+                matches!(
+                    message.as_ref().map(|m| m.view()),
+                    Some(gst::MessageView::Eos(_))
+                ),
+                "{message:?}"
+            );
+            let first = queue.try_read_frame().unwrap().context;
+            assert_eq!(
+                first.frame_capture_ts,
+                Some(UNIX_EPOCH + Duration::from_secs(100))
+            );
+            for index in 1..3 {
+                let next = queue.try_read_frame().unwrap().context;
+                assert_eq!(next.frame_index, index);
+                assert_eq!(
+                    next.frame_capture_ts,
+                    Some(UNIX_EPOCH + Duration::from_millis(100_000 + index * 40))
+                );
+                assert_eq!(next.us_since(&first), index as u32 * 40_000);
+            }
+            if pooled {
+                assert_eq!(
+                    stats
+                        .snapshot()
+                        .memory_operations
+                        .get("gst-source/sink_zero_copy"),
+                    Some(&3)
+                );
+            }
+        }
+    }
 }

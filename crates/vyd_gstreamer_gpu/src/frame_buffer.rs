@@ -63,6 +63,10 @@ impl FrameBuffer {
             vyd_core::capture_timing::CaptureClock::new(self.should_spill, latency, zero);
     }
 
+    pub fn reset_timing(&self) {
+        self.clock.lock().unwrap().reset();
+    }
+
     pub fn set_frame_zero(&self, utc: std::time::SystemTime) {
         self.clock.lock().unwrap().set_frame_zero(utc);
     }
@@ -87,6 +91,10 @@ impl FrameBuffer {
             return Err("Frame size mismatch");
         }
 
+        let mut buffer = self.buffer.lock().unwrap();
+        if !self.should_spill && buffer.len() == self.capacity {
+            return Err("Buffer full");
+        }
         let frame = vyd_core::Frame::from_raw(
             self.frame_info.width,
             self.frame_info.height,
@@ -94,7 +102,6 @@ impl FrameBuffer {
         )
         .map_err(|_| "Frame size mismatch")?;
         let context = self.clock.lock().unwrap().ingest(frame, timing, capture);
-        let mut buffer = self.buffer.lock().unwrap();
         let buffer_len = buffer.len();
 
         if self.should_spill {
@@ -233,5 +240,47 @@ impl FrameBuffer {
     pub fn is_empty(&self) -> bool {
         let buffer = self.buffer.lock().unwrap();
         buffer.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rejected_offline_frame_does_not_consume_identity_or_time() {
+        let queue = FrameBuffer::new(
+            FrameInfo {
+                width: 1,
+                height: 1,
+                stride: 1,
+                timestamp: 0,
+                frame_size: 1,
+            },
+            4,
+            false,
+        );
+        let write = |us| {
+            queue.write_frame_with_timing(
+                &[0],
+                None,
+                vyd_core::FrameTiming {
+                    presentation_timestamp: Some(Duration::from_micros(us)),
+                    ..Default::default()
+                },
+                None,
+            )
+        };
+        for us in [0, 40_000, 80_000, 120_000] {
+            write(us).unwrap();
+        }
+        assert_eq!(write(999_000), Err("Buffer full"));
+        let first = queue.try_read_frame().unwrap().context;
+        write(160_000).unwrap();
+        for _ in 0..3 {
+            queue.try_read_frame().unwrap();
+        }
+        let last = queue.try_read_frame().unwrap().context;
+        assert_eq!(last.frame_index, 4);
+        assert_eq!(last.us_since(&first), 160_000);
     }
 }
