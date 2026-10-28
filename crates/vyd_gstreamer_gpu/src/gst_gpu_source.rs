@@ -15,7 +15,7 @@ use crate::gst_pipeline::*;
 use thiserror::Error;
 use vyd_core::statistics::{PipelineStatistics, ProcessingType};
 use vyd_core::traits::FrameSource;
-use vyd_core::{pipeline::PipelineContext, Frame, FrameContext};
+use vyd_core::{pipeline::PipelineContext, FrameContext};
 
 const FRAME_BLOCKING_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -106,6 +106,12 @@ impl GstGpuSource {
 
         let live_mode = config.input.is_live_mode();
         let ring_buffer = Arc::new(FrameBuffer::new(frame_info, 10, live_mode));
+        ring_buffer.configure_timing(
+            config.mean_frame_latency_ms,
+            config
+                .frame_zero_capture_unix_us
+                .and_then(|us| std::time::UNIX_EPOCH.checked_add(Duration::from_micros(us))),
+        );
 
         // See https://lib.rs/crates/tracing-gstreamer
         // See also https://gstreamer.freedesktop.org/documentation/tutorials/basic/debugging-tools.html?gi-language=rust
@@ -346,60 +352,41 @@ impl GstGpuSource {
 
         // Time the actual frame processing work
         let processing_start = Instant::now();
+        // Delivered-frame statistics are independent of ingestion identity.
+        ctx.get_as_or_insert("frames_sourced", || AtomicUsize::new(0))
+            .fetch_add(1, Ordering::SeqCst);
 
-        let width = 1920u32;
-        let height = 1080u32;
+        let mut frame_ctx = frame_data.context;
 
-        if let Ok(frame) = Frame::from_raw(width, height, frame_data.bytes.to_vec()) {
-            let frame_index = Self::inc_frame_counter(ctx);
-            let mut frame_ctx = FrameContext::new(frame, frame_index);
-
-            // Add timing data to frame context metadata if available
-            if let Some(timing_data) = frame_data.timing_data {
-                if let Ok(stats) = ctx.try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics")
-                {
-                    vyd_gstreamer::timing::record_gst_timing_data(stats, &timing_data);
-                }
-                frame_ctx.put("timing_data", timing_data);
-                tracing::trace!(
-                    "Added timing metadata to frame context with {} fields",
-                    frame_ctx
-                        .metadata
-                        .get("timing_data")
-                        .and_then(|data| data.downcast_ref::<Vec<(u64, String)>>())
-                        .map(|map| map.len())
-                        .unwrap_or(0)
-                );
-            }
-
-            let processing_duration = processing_start.elapsed();
-            let duration_us = processing_duration.as_micros() as u64;
-
-            // Record timing to pipeline statistics if available
+        // Add timing data to frame context metadata if available
+        if let Some(timing_data) = frame_data.timing_data {
             if let Ok(stats) = ctx.try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics") {
-                stats.record_stage_timing("GstSource", duration_us);
+                vyd_gstreamer::timing::record_gst_timing_data(stats, &timing_data);
             }
-
-            tracing::trace!(duration_us, "GstSource frame processing completed");
-
-            tracing::trace!("Emitting frame");
-            Some(frame_ctx)
-        } else {
-            tracing::warn!("Null frame emitted");
-            None
-        }
-    }
-
-    fn inc_frame_counter(ctx: &mut PipelineContext) -> usize {
-        let counter = ctx
-            .entry("frames_sourced".to_string())
-            .or_insert_with(|| Box::new(AtomicUsize::new(0)));
-
-        if let Some(atomic_counter) = counter.downcast_ref::<AtomicUsize>() {
-            return atomic_counter.fetch_add(1, Ordering::SeqCst);
+            frame_ctx.put("timing_data", timing_data);
+            tracing::trace!(
+                "Added timing metadata to frame context with {} fields",
+                frame_ctx
+                    .metadata
+                    .get("timing_data")
+                    .and_then(|data| data.downcast_ref::<Vec<(u64, String)>>())
+                    .map(|map| map.len())
+                    .unwrap_or(0)
+            );
         }
 
-        0
+        let processing_duration = processing_start.elapsed();
+        let duration_us = processing_duration.as_micros() as u64;
+
+        // Record timing to pipeline statistics if available
+        if let Ok(stats) = ctx.try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics") {
+            stats.record_stage_timing("GstSource", duration_us);
+        }
+
+        tracing::trace!(duration_us, "GstSource frame processing completed");
+
+        tracing::trace!("Emitting frame");
+        Some(frame_ctx)
     }
 }
 

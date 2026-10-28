@@ -19,7 +19,9 @@ const META: &str = "VydSerialFrameContextMeta";
 pub(super) struct ContextData {
     metadata: HashMap<String, Box<dyn Any + Send + Sync>>,
     typed_metadata: TypedFrameMetadata,
-    index: usize,
+    index: u64,
+    capture_ts: Option<std::time::SystemTime>,
+    relative_timing: vyd_core::FrameContextTiming,
     timing: FrameTiming,
     pub started: Instant,
 }
@@ -189,12 +191,15 @@ pub(super) fn pack(
             "unsupported midstream format change in serial GST adapter",
         ));
     }
+    let relative_timing = frame.capture_timing();
     let FrameContext {
         frame,
         frame_index,
         metadata,
         typed_metadata,
         timing,
+        frame_capture_ts,
+        ..
     } = frame;
     let Frame::Cpu(cpu) = frame else {
         unreachable!()
@@ -234,7 +239,7 @@ pub(super) fn pack(
     let writable = buffer
         .get_mut()
         .ok_or_else(|| error("new GST buffer is not writable"))?;
-    writable.set_offset(frame_index as u64);
+    writable.set_offset(frame_index);
     writable.set_pts(clock_time(timing.presentation_timestamp)?);
     writable.set_dts(clock_time(timing.decode_timestamp)?);
     writable.set_duration(clock_time(timing.duration)?);
@@ -252,6 +257,8 @@ pub(super) fn pack(
             metadata,
             typed_metadata,
             index: frame_index,
+            capture_ts: frame_capture_ts,
+            relative_timing,
             timing,
             started,
         },
@@ -312,16 +319,13 @@ pub(super) fn unpack(
         copy_pixels(map.as_slice(), &layout, info, stats)?
     };
     let data = take_context(buffer)?;
-    Ok((
-        FrameContext {
-            frame: Frame::Cpu(cpu),
-            frame_index: data.index,
-            timing: data.timing,
-            metadata: data.metadata,
-            typed_metadata: data.typed_metadata,
-        },
-        data.started,
-    ))
+    let mut context = FrameContext::new(Frame::Cpu(cpu), data.index);
+    context.restore_capture_timing(data.relative_timing);
+    context.frame_capture_ts = data.capture_ts;
+    context.timing = data.timing;
+    context.metadata = data.metadata;
+    context.typed_metadata = data.typed_metadata;
+    Ok((context, data.started))
 }
 
 pub(super) fn validate_native_buffer(
@@ -462,7 +466,20 @@ mod tests {
         register();
         register();
         let drops = Arc::new(AtomicUsize::new(0));
-        let mut context = FrameContext::new(Frame::from_raw(4, 2, vec![1; 8]).unwrap(), 31);
+        let mut clock =
+            vyd_core::capture_timing::CaptureClock::new(false, 0, Some(std::time::UNIX_EPOCH));
+        let previous = clock.ingest(
+            Frame::from_raw(4, 2, vec![1; 8]).unwrap(),
+            FrameTiming::default(),
+            Some(std::time::UNIX_EPOCH),
+        );
+        let capture = std::time::UNIX_EPOCH + Duration::from_millis(40);
+        let mut context = clock.ingest(
+            Frame::from_raw(4, 2, vec![1; 8]).unwrap(),
+            FrameTiming::default(),
+            Some(capture),
+        );
+        context.frame_index = 31;
         context.timing = FrameTiming {
             presentation_timestamp: Some(Duration::from_millis(40)),
             decode_timestamp: Some(Duration::from_millis(30)),
@@ -480,6 +497,8 @@ mod tests {
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         let (restored, _) = unpack(&copy, &info, &stats).unwrap();
         assert_eq!(restored.frame_index, 31);
+        assert_eq!(restored.frame_capture_ts, Some(capture));
+        assert_eq!(restored.us_since(&previous), 40_000);
         assert_eq!(
             restored.timing.presentation_timestamp,
             Some(Duration::from_millis(40))

@@ -1,3 +1,6 @@
+// FrameContext can carry wgpu frames; its Send proof needs the same depth as the CPU adapter.
+#![recursion_limit = "256"]
+
 mod config;
 mod frame_buffer;
 mod gst_buffer_timing_meta;

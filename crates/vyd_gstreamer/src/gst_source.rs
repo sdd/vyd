@@ -110,6 +110,9 @@ impl GstSource {
         let live_mode = config.input.is_live_mode();
         let output_frame_queue = Arc::new(VydFrameQueue::new(frame_info, 10, live_mode));
 
+        output_frame_queue
+            .configure_timing(config.mean_frame_latency_ms, config.frame_zero_capture_ts());
+
         crate::initialize_gstreamer_tracing()?;
 
         let pool = if config.zc_enabled {
@@ -381,16 +384,14 @@ impl GstSource {
         ctx: &mut PipelineContext,
     ) -> Option<FrameContext> {
         let processing_start = Instant::now();
+        // Delivered-frame statistics are independent of ingestion identity.
+        ctx.get_as_or_insert("frames_sourced", || AtomicUsize::new(0))
+            .fetch_add(1, Ordering::SeqCst);
 
         let FrameWithTiming {
-            frame,
+            context: mut frame_ctx,
             timing_data,
-            media_timing,
         } = frame_data;
-
-        let frame_index = Self::inc_frame_counter(ctx);
-        let mut frame_ctx = FrameContext::new(frame, frame_index);
-        frame_ctx.timing = media_timing;
 
         if let Some(timing_data) = timing_data {
             if let Ok(stats) = ctx.try_get_as::<Arc<PipelineStatistics>>("pipeline_statistics") {
@@ -416,11 +417,6 @@ impl GstSource {
         );
 
         Some(frame_ctx)
-    }
-
-    fn inc_frame_counter(ctx: &mut PipelineContext) -> usize {
-        ctx.get_as_or_insert("frames_sourced", || AtomicUsize::new(0))
-            .fetch_add(1, Ordering::SeqCst)
     }
 }
 

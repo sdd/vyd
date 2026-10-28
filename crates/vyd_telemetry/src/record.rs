@@ -33,8 +33,7 @@ impl FrameEnvelope {
     ) -> Result<Self, VydError> {
         let (width, height) = frame.frame.dimensions();
         Ok(Self {
-            frame_index: u64::try_from(frame.frame_index)
-                .context("recording frame index exceeds u64")?,
+            frame_index: frame.frame_index,
             presentation_timestamp_ns: nanos(frame.timing.presentation_timestamp)?,
             decode_timestamp_ns: nanos(frame.timing.decode_timestamp)?,
             duration_ns: nanos(frame.timing.duration)?,

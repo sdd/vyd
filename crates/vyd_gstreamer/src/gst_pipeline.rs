@@ -36,6 +36,16 @@ fn build_generic_pipeline(
         .downcast::<Pipeline>()
         .expect("Expected a gst::Pipeline");
 
+    // GStreamer >= 1.22 can retain the sender's NTP clock mapping.
+    for element in pipeline.iterate_elements().into_iter().flatten() {
+        if element
+            .find_property("add-reference-timestamp-meta")
+            .is_some()
+        {
+            element.set_property("add-reference-timestamp-meta", true);
+        }
+    }
+
     // Create videoconvert for format conversion
     let videoconvert = gst::ElementFactory::make("videoconvert")
         .name("convert")

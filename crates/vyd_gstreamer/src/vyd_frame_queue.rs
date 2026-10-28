@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
-use vyd_core::{Frame, FrameTiming};
+use vyd_core::{capture_timing::CaptureClock, Frame, FrameContext, FrameTiming};
 
 #[allow(dead_code)]
 pub struct FrameInfo {
@@ -14,11 +14,9 @@ pub struct FrameInfo {
 }
 
 /// Frame data with associated timing metadata
-#[derive(Debug, Clone)]
 pub struct FrameWithTiming {
-    pub frame: Frame,
+    pub context: FrameContext,
     pub timing_data: Option<Vec<(u64, String)>>,
-    pub media_timing: FrameTiming,
 }
 
 /// `FrameBuffer` buffers frames between stages.
@@ -29,6 +27,7 @@ pub struct FrameWithTiming {
 /// Can be configured in either blocking or frame-dropping modes.
 pub struct VydFrameQueue {
     buffer: Mutex<VecDeque<FrameWithTiming>>,
+    clock: Mutex<CaptureClock>,
     not_empty: Condvar,
     frame_info: FrameInfo,
     capacity: usize,
@@ -49,6 +48,7 @@ impl VydFrameQueue {
 
         Self {
             buffer: Mutex::new(VecDeque::with_capacity(capacity)),
+            clock: Mutex::new(CaptureClock::new(should_spill, 0, None)),
             not_empty: Condvar::new(),
             frame_info,
             capacity,
@@ -57,6 +57,14 @@ impl VydFrameQueue {
             pause_threshold,
             resume_threshold: 1,
         }
+    }
+
+    pub fn configure_timing(&self, latency_ms: u64, frame_zero: Option<std::time::SystemTime>) {
+        *self.clock.lock().unwrap() = CaptureClock::new(self.should_spill, latency_ms, frame_zero);
+    }
+
+    pub fn set_frame_zero(&self, utc: std::time::SystemTime) {
+        self.clock.lock().unwrap().set_frame_zero(utc);
     }
 
     pub fn clear_state_sender(&self) {
@@ -87,6 +95,21 @@ impl VydFrameQueue {
         timing_data: Option<Vec<(u64, String)>>,
         media_timing: FrameTiming,
     ) -> Result<(), &'static str> {
+        self.write_captured_frame(frame, timing_data, media_timing, None)
+    }
+
+    pub fn write_captured_frame(
+        &self,
+        frame: Frame,
+        timing_data: Option<Vec<(u64, String)>>,
+        media_timing: FrameTiming,
+        capture_utc: Option<std::time::SystemTime>,
+    ) -> Result<(), &'static str> {
+        let context = self
+            .clock
+            .lock()
+            .unwrap()
+            .ingest(frame, media_timing, capture_utc);
         let mut buffer = self.buffer.lock().unwrap();
         let buffer_len = buffer.len();
 
@@ -121,9 +144,8 @@ impl VydFrameQueue {
         }
 
         let frame_with_timing = FrameWithTiming {
-            frame,
+            context,
             timing_data,
-            media_timing,
         };
 
         buffer.push_back(frame_with_timing);
@@ -223,5 +245,44 @@ impl VydFrameQueue {
     pub fn is_empty(&self) -> bool {
         let buffer = self.buffer.lock().unwrap();
         buffer.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn spill_preserves_ingestion_indices_and_media_time() {
+        let queue = VydFrameQueue::new(
+            FrameInfo {
+                width: 1,
+                height: 1,
+                stride: 1,
+                timestamp: 0,
+                frame_size: 1,
+            },
+            4,
+            true,
+        );
+        let write = |index: u64| {
+            queue
+                .write_frame_with_metadata(
+                    Frame::from_raw(1, 1, vec![0]).unwrap(),
+                    None,
+                    FrameTiming {
+                        presentation_timestamp: Some(Duration::from_millis(index * 40)),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+        };
+        write(0);
+        let first = queue.try_read_frame().unwrap().context;
+        for index in 1..=8 {
+            write(index);
+        }
+        let next = queue.try_read_frame().unwrap().context;
+        assert_eq!(next.frame_index, 5);
+        assert_eq!(next.us_since(&first), 200_000);
     }
 }

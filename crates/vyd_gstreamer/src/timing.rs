@@ -78,3 +78,70 @@ pub fn record_gst_timing_data(stats: &PipelineStatistics, timing_data: &[(u64, S
         }
     }
 }
+
+/// Only known UTC reference clock domains are usable as absolute capture time.
+pub fn capture_utc(buffer: &gst::BufferRef) -> Option<std::time::SystemTime> {
+    buffer
+        .iter_meta::<gst::ReferenceTimestampMeta>()
+        .find_map(|meta| {
+            let reference = meta.reference().structure(0)?.name();
+            let nanos = meta.timestamp().nseconds();
+            let unix_nanos = match reference.as_str() {
+                "timestamp/x-unix" => nanos,
+                "timestamp/x-ntp" => nanos.checked_sub(2_208_988_800u64 * 1_000_000_000)?,
+                _ => return None,
+            };
+            std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_nanos(unix_nanos))
+        })
+}
+
+/// Opt-in container convention: an extended comment in Unix microseconds.
+/// Generic date/date-time tags describe creation and are deliberately ignored.
+pub fn frame_zero_capture_utc(tags: &gst::TagListRef) -> Option<std::time::SystemTime> {
+    tags.iter_tag::<gst::tags::ExtendedComment>()
+        .find_map(|value| {
+            let us = value
+                .get()
+                .strip_prefix("frame-zero-capture-unix-us=")?
+                .parse::<u64>()
+                .ok()?;
+            std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_micros(us))
+        })
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    #[test]
+    fn utc_reference_domains_and_explicit_container_tag() {
+        gst::init().unwrap();
+        for (domain, seconds, expected) in [
+            ("timestamp/x-unix", 100, Some(100)),
+            ("timestamp/x-ntp", 2_208_988_900, Some(100)),
+            ("timestamp/x-ntp", 10, None),
+            ("timestamp/x-monotonic", 100, None),
+        ] {
+            let mut buffer = gst::Buffer::new();
+            gst::ReferenceTimestampMeta::add(
+                buffer.get_mut().unwrap(),
+                &gst::Caps::builder(domain).build(),
+                gst::ClockTime::from_seconds(seconds),
+                None,
+            );
+            assert_eq!(
+                capture_utc(&buffer),
+                expected.map(|s| std::time::UNIX_EPOCH + std::time::Duration::from_secs(s))
+            );
+        }
+        let mut tags = gst::TagList::new();
+        assert_eq!(frame_zero_capture_utc(&tags), None);
+        tags.get_mut().unwrap().add::<gst::tags::ExtendedComment>(
+            &"frame-zero-capture-unix-us=100000000",
+            gst::TagMergeMode::Append,
+        );
+        assert_eq!(
+            frame_zero_capture_utc(&tags),
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(100))
+        );
+    }
+}
