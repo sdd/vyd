@@ -161,7 +161,10 @@ fn build_generic_pipeline(
     for element in pipeline.iterate_elements().into_iter().flatten() {
         if element
             .find_property("add-reference-timestamp-meta")
-            .is_some()
+            .is_some_and(|p| {
+                p.value_type() == bool::static_type()
+                    && p.flags().contains(gst::glib::ParamFlags::WRITABLE)
+            })
         {
             element.set_property("add-reference-timestamp-meta", true);
         }

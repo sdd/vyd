@@ -330,6 +330,16 @@ mod imp {
 
     impl BaseSinkImpl for VydGstSink {
         fn event(&self, event: gst::Event) -> bool {
+            if matches!(
+                event.view(),
+                gst::EventView::FlushStop(_)
+                    | gst::EventView::StreamStart(_)
+                    | gst::EventView::Segment(_)
+            ) {
+                if let Some(queue) = self.output_frame_queue.lock().unwrap().as_ref() {
+                    queue.reset_timing();
+                }
+            }
             if let gst::EventView::Tag(tag) = event.view() {
                 if let Some(utc) = crate::timing::frame_zero_capture_utc(tag.tag()) {
                     if let Some(queue) = self.output_frame_queue.lock().unwrap().as_ref() {
@@ -466,5 +476,61 @@ mod tests {
         let caps = info.to_caps().unwrap();
         let error = sink.imp().set_caps(&caps).unwrap_err();
         assert!(error.to_string().contains("not yet implemented"));
+    }
+}
+
+#[cfg(test)]
+mod clock_event_tests {
+    use super::*;
+    use gst_base::subclass::prelude::BaseSinkImpl;
+    use std::time::Duration;
+    use vyd_core::{Frame, FrameTiming};
+
+    #[test]
+    fn flush_stream_and_segment_events_rebase_the_clock() {
+        gst::init().unwrap();
+        let segment = gst::FormattedSegment::<gst::ClockTime>::new();
+        for event in [
+            gst::event::FlushStop::new(false),
+            gst::event::StreamStart::new("restart"),
+            gst::event::Segment::new(&segment),
+        ] {
+            let queue = Arc::new(VydFrameQueue::new(
+                crate::vyd_frame_queue::FrameInfo {
+                    width: 1,
+                    height: 1,
+                    stride: 1,
+                    timestamp: 0,
+                    frame_size: 1,
+                },
+                4,
+                true,
+            ));
+            let sink = VydGstSink::new();
+            sink.set_vyd_frame_queue(queue.clone());
+            let write = |us| {
+                let timing = FrameTiming {
+                    presentation_timestamp: Some(Duration::from_micros(us)),
+                    ..Default::default()
+                };
+                queue
+                    .write_frame_with_metadata(
+                        Frame::from_raw(1, 1, vec![0]).unwrap(),
+                        None,
+                        timing,
+                    )
+                    .unwrap();
+            };
+            write(60_000_000);
+            queue.try_read_frame().unwrap();
+            sink.imp().event(event);
+            write(0);
+            let first = queue.try_read_frame().unwrap().context;
+            write(40_000);
+            let next = queue.try_read_frame().unwrap().context;
+            assert_eq!(first.frame_index, 1);
+            assert_eq!(next.frame_index, 2);
+            assert_eq!(next.us_since(&first), 40_000);
+        }
     }
 }

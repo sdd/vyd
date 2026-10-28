@@ -106,11 +106,16 @@ returns relative capture microseconds using wrapping subtraction. The private
 wrap.
 
 Relative timing uses consecutive genuine capture UTC deltas, then media PTS,
-then monotonic ingestion time. Small backwards PTS steps are clamped without
-double-counting the recovery. Offline decoding therefore preserves media time
+then monotonic ingestion time. Backwards PTS steps up to two frame durations (100 ms when duration is unknown)
+are clamped without double-counting the recovery. Larger steps clear the UTC
+estimation window and use monotonic ingestion time for the transition. Capture
+UTC deltas that disagree with PTS by more than that same tolerance fall back to
+PTS, in either direction. Offline decoding therefore preserves media time
 regardless of processing speed. Missing source timestamps require the ingestion
-fallback; original timing cannot be recovered from an untimed file. Seeking,
-stream restarts, or PTS discontinuities require a new source clock.
+fallback; original timing cannot be recovered from an untimed file. The GStreamer sinks rebase clocks on FlushStop, StreamStart, and Segment events;
+indices and the relative timeline remain continuous. Custom sources can call
+`CaptureClock::reset()` at equivalent boundaries. Offline UTC anchors follow
+media PTS across seeks; the relative transition interval uses ingestion time.
 
 Both GStreamer source adapters accept `mean_frame_latency_ms` (unsigned integer,
 default `0`). For live streams, UTC is estimated from the mean of the latest 32
@@ -135,3 +140,11 @@ plus relative media time; latency does not adjust this offline anchor. These
 fields survive Rust stages and supported GStreamer context handoffs, including
 ordered correspondence bridges. They are not added to the Vortex recording
 schema by this change.
+
+API migration: this change is breaking and must be released as such. `frame_index`
+and its constructor argument are now `u64`. Use `FrameContext::new` rather than
+struct literals, and `CaptureClock` when assigning source timing. Queued frames
+now carry a context and no longer implement `Debug`/`Clone`; contexts contain
+non-cloneable application metadata. The `u32` wrapping interval API is intentional:
+callers needing longer intervals must accumulate successive `us_since` values
+into a wider counter, sampling at least once per wrap.

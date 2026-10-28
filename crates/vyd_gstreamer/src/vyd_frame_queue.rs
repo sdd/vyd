@@ -63,6 +63,10 @@ impl VydFrameQueue {
         *self.clock.lock().unwrap() = CaptureClock::new(self.should_spill, latency_ms, frame_zero);
     }
 
+    pub fn reset_timing(&self) {
+        self.clock.lock().unwrap().reset();
+    }
+
     pub fn set_frame_zero(&self, utc: std::time::SystemTime) {
         self.clock.lock().unwrap().set_frame_zero(utc);
     }
@@ -105,12 +109,15 @@ impl VydFrameQueue {
         media_timing: FrameTiming,
         capture_utc: Option<std::time::SystemTime>,
     ) -> Result<(), &'static str> {
+        let mut buffer = self.buffer.lock().unwrap();
+        if !self.should_spill && buffer.len() == self.capacity {
+            return Err("Buffer full");
+        }
         let context = self
             .clock
             .lock()
             .unwrap()
             .ingest(frame, media_timing, capture_utc);
-        let mut buffer = self.buffer.lock().unwrap();
         let buffer_len = buffer.len();
 
         if self.should_spill {
