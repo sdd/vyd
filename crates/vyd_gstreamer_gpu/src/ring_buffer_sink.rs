@@ -67,7 +67,22 @@ mod imp {
             };
 
             tracing::trace!("calling write_frame with timing data");
-            match ring_buffer.write_frame_with_timing(data, timing_data_option) {
+            match ring_buffer.write_frame_with_timing(
+                data,
+                timing_data_option,
+                vyd_core::FrameTiming {
+                    presentation_timestamp: buffer
+                        .pts()
+                        .map(|t| std::time::Duration::from_nanos(t.nseconds())),
+                    decode_timestamp: buffer
+                        .dts()
+                        .map(|t| std::time::Duration::from_nanos(t.nseconds())),
+                    duration: buffer
+                        .duration()
+                        .map(|t| std::time::Duration::from_nanos(t.nseconds())),
+                },
+                vyd_gstreamer::timing::capture_utc(buffer),
+            ) {
                 Ok(()) => Ok(gst::FlowSuccess::Ok),
                 Err("Buffer full") => {
                     // Pipeline should already be paused but just in case
@@ -124,6 +139,17 @@ mod imp {
     }
 
     impl BaseSinkImpl for RingBufferSink {
+        fn event(&self, event: gst::Event) -> bool {
+            if let gst::EventView::Tag(tag) = event.view() {
+                if let Some(utc) = vyd_gstreamer::timing::frame_zero_capture_utc(tag.tag()) {
+                    if let Some(queue) = self.buffer.lock().unwrap().as_ref() {
+                        queue.set_frame_zero(utc);
+                    }
+                }
+            }
+            self.parent_event(event)
+        }
+
         fn render(&self, buffer: &gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
             self.render(buffer)
         }

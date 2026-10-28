@@ -158,6 +158,15 @@ fn build_generic_pipeline(
         .downcast::<Pipeline>()
         .expect("Expected a gst::Pipeline");
 
+    for element in pipeline.iterate_elements().into_iter().flatten() {
+        if element
+            .find_property("add-reference-timestamp-meta")
+            .is_some()
+        {
+            element.set_property("add-reference-timestamp-meta", true);
+        }
+    }
+
     let sink = pipeline
         .by_name("sink")
         .unwrap()

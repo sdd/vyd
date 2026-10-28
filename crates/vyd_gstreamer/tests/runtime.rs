@@ -20,8 +20,8 @@ use vyd_gstreamer::runtime::{
 };
 
 type Events = Arc<Mutex<Vec<String>>>;
-type Frames = Arc<Mutex<Vec<(usize, Vec<u8>, String)>>>;
-struct TypedTag(usize);
+type Frames = Arc<Mutex<Vec<(u64, Vec<u8>, String)>>>;
+struct TypedTag(u64);
 fn record(events: &Events, event: &str) {
     events.lock().unwrap().push(event.into());
 }
@@ -66,10 +66,10 @@ impl FrameSource for Source {
         };
         let mut frame = FrameContext::new(
             Frame::from_raw(width, 2, vec![self.index as u8; width as usize * 2]).unwrap(),
-            self.index,
+            self.index as u64,
         );
         frame.put("tag", format!("frame-{}", self.index));
-        frame.put_typed(TypedTag(self.index));
+        frame.put_typed(TypedTag(self.index as u64));
         frame.timing = FrameTiming {
             presentation_timestamp: Some(Duration::from_millis(self.index as u64 * 40)),
             decode_timestamp: None,
@@ -201,7 +201,7 @@ impl FrameSink for Sink {
         );
         assert_eq!(
             frame.timing.presentation_timestamp,
-            Some(Duration::from_millis(frame.frame_index as u64 * 40))
+            Some(Duration::from_millis(frame.frame_index * 40))
         );
         assert_eq!(frame.timing.duration, Some(Duration::from_millis(40)));
         let Frame::Cpu(cpu) = &frame.frame else {

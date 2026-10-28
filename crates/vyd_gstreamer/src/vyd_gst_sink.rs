@@ -265,7 +265,12 @@ mod imp {
                     .duration()
                     .map(|time| Duration::from_nanos(time.nseconds())),
             };
-            match queue.write_frame_with_metadata(frame, Some(timing_data), media_timing) {
+            match queue.write_captured_frame(
+                frame,
+                Some(timing_data),
+                media_timing,
+                crate::timing::capture_utc(buffer),
+            ) {
                 Ok(()) => Ok(gst::FlowSuccess::Ok),
                 Err("Buffer full") => {
                     tracing::warn!("Frame rejected due to full buffer");
@@ -324,6 +329,17 @@ mod imp {
     }
 
     impl BaseSinkImpl for VydGstSink {
+        fn event(&self, event: gst::Event) -> bool {
+            if let gst::EventView::Tag(tag) = event.view() {
+                if let Some(utc) = crate::timing::frame_zero_capture_utc(tag.tag()) {
+                    if let Some(queue) = self.output_frame_queue.lock().unwrap().as_ref() {
+                        queue.set_frame_zero(utc);
+                    }
+                }
+            }
+            self.parent_event(event)
+        }
+
         fn set_caps(&self, caps: &gst::Caps) -> Result<(), gst::LoggableError> {
             let info = gst_video::VideoInfo::from_caps(caps).map_err(|_| {
                 gst::loggable_error!(gst::CAT_RUST, "unsupported Vyd source video caps")

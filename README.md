@@ -93,3 +93,45 @@ Boundary 0 follows the source; boundary 1 follows the first Rust processor. A se
 Nightly CI checks formatting, Rust and workflow lints, tests, and coverage. Pushes to `master` prepare a release-plz PR after the all-feature tests pass. Merging a `release-plz-` PR publishes the workspace crates and creates one `crate-name/version` tag and GitHub release per crate.
 
 Configure the repository secrets `RELEASE_PLZ_TOKEN` (a GitHub token that can open release PRs and trigger their CI) and `CARGO_REGISTRY_TOKEN` (a crates.io token with permission to publish the crates) before enabling the release workflows. `CODECOV_TOKEN` is optional; coverage is always saved as a workflow artifact.
+
+## Frame capture timing
+
+`FrameContext::frame_index` is a `u64` assigned at ingestion, before Vyd's live
+queue drops frames. Consumers see gaps rather than renumbered frames. Processors
+should preserve the context when replacing pixels. Custom sources can use
+`vyd_core::capture_timing::CaptureClock` to assign indices and timing together.
+`frame_capture_ts: Option<SystemTime>` carries capture UTC; `us_since(&previous)`
+returns relative capture microseconds using wrapping subtraction. The private
+32-bit counter wraps every 71.6 minutes, so differences must span less than one
+wrap.
+
+Relative timing uses consecutive genuine capture UTC deltas, then media PTS,
+then monotonic ingestion time. Small backwards PTS steps are clamped without
+double-counting the recovery. Offline decoding therefore preserves media time
+regardless of processing speed. Missing source timestamps require the ingestion
+fallback; original timing cannot be recovered from an untimed file. Seeking,
+stream restarts, or PTS discontinuities require a new source clock.
+
+Both GStreamer source adapters accept `mean_frame_latency_ms` (unsigned integer,
+default `0`). For live streams, UTC is estimated from the mean of the latest 32
+ingestion UTC-minus-PTS samples, then this latency is subtracted. Until the window
+fills, the available samples are used. Without PTS, ingestion UTC minus latency is
+used. Latency never changes relative timing or genuine source capture UTC.
+Network jitter, sender clock errors, receiver UTC adjustments, and an inaccurate
+latency setting limit the accuracy of these estimates. RTSP reference timestamp
+metadata is requested on GStreamer versions that support it; Unix and NTP
+reference domains are accepted, but the sender must actually provide a valid
+capture clock mapping. Upstream camera/decoder losses cannot be counted by Vyd.
+
+Offline files have no inferred UTC unless genuine capture UTC or an explicit
+frame-zero capture timestamp is available. The supported container convention is
+an `ExtendedComment` tag `frame-zero-capture-unix-us=<Unix microseconds>`. This
+works only when the demuxer forwards that tag to the video sink before frames;
+it is not general MP4/MKV metadata discovery. Alternatively, supply
+`frame_zero_capture_unix_us` in the source configuration after extracting a known
+capture timestamp externally. The configured value takes precedence over tags.
+Generic container creation dates are deliberately ignored. UTC is frame-zero UTC
+plus relative media time; latency does not adjust this offline anchor. These
+fields survive Rust stages and supported GStreamer context handoffs, including
+ordered correspondence bridges. They are not added to the Vortex recording
+schema by this change.

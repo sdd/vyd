@@ -7,11 +7,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct DummySource {
     frame_count: usize,
+    clock: crate::capture_timing::CaptureClock,
 }
 
 impl DummySource {
     pub fn new(_params: Option<&toml::Value>) -> Result<Self, VydError> {
-        Ok(Self { frame_count: 5 })
+        Ok(Self {
+            frame_count: 5,
+            clock: crate::capture_timing::CaptureClock::new(true, 0, None),
+        })
     }
 }
 
@@ -27,17 +31,16 @@ impl FrameSource for DummySource {
                 .entry("frames_sourced".to_string())
                 .or_insert_with(|| Box::new(AtomicUsize::new(0)));
 
-            let frame_index = if let Some(atomic_counter) = counter.downcast_ref::<AtomicUsize>() {
-                atomic_counter.fetch_add(1, Ordering::SeqCst)
-            } else {
-                0
-            };
+            if let Some(atomic_counter) = counter.downcast_ref::<AtomicUsize>() {
+                atomic_counter.fetch_add(1, Ordering::SeqCst);
+            }
 
-            Some(FrameContext::new(
+            Some(self.clock.ingest(
                 Frame::Cpu(
                     CpuFrame::from_vec(10, 10, vec![0; 100]).expect("Failed to create dummy frame"),
                 ),
-                frame_index,
+                crate::FrameTiming::default(),
+                None,
             ))
         }
     }

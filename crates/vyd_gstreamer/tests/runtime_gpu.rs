@@ -14,7 +14,7 @@ use vyd_core::{
 };
 use vyd_gstreamer::runtime::{run_pipeline, run_pipeline_with_native_nodes, NativeNode};
 
-type Output = Arc<Mutex<Vec<(usize, Vec<u8>, String)>>>;
+type Output = Arc<Mutex<Vec<(u64, Vec<u8>, String)>>>;
 type Events = Arc<Mutex<Vec<String>>>;
 
 struct Source {
@@ -31,7 +31,7 @@ impl FrameSource for Source {
         self.next += 1;
         let mut frame = FrameContext::new(
             Frame::from_raw(3, 3, (1..=9).map(|value| value + index as u8).collect()).unwrap(),
-            index,
+            index as u64,
         );
         frame.put("route", String::new());
         Some(frame)
@@ -48,7 +48,7 @@ enum Kind {
     Gpu {
         input: PixelFormat,
         output: PixelFormat,
-        skip_index: Option<usize>,
+        skip_index: Option<u64>,
     },
     Cpu,
 }

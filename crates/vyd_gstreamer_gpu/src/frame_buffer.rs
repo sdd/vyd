@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
 use std::sync::{Condvar, Mutex};
@@ -14,9 +13,8 @@ pub struct FrameInfo {
 }
 
 /// Frame data with associated timing metadata
-#[derive(Debug, Clone)]
 pub struct FrameData {
-    pub bytes: Bytes,
+    pub context: vyd_core::FrameContext,
     pub timing_data: Option<Vec<(u64, String)>>,
 }
 
@@ -28,6 +26,7 @@ pub struct FrameData {
 /// Can be configured in either blocking or frame-dropping modes.
 pub struct FrameBuffer {
     buffer: Mutex<VecDeque<FrameData>>,
+    clock: Mutex<vyd_core::capture_timing::CaptureClock>,
     not_empty: Condvar,
     frame_info: FrameInfo,
     capacity: usize,
@@ -44,6 +43,11 @@ impl FrameBuffer {
 
         Self {
             buffer: Mutex::new(VecDeque::with_capacity(capacity)),
+            clock: Mutex::new(vyd_core::capture_timing::CaptureClock::new(
+                should_spill,
+                0,
+                None,
+            )),
             not_empty: Condvar::new(),
             frame_info,
             capacity,
@@ -52,6 +56,15 @@ impl FrameBuffer {
             pause_threshold,
             resume_threshold: 1,
         }
+    }
+
+    pub fn configure_timing(&self, latency: u64, zero: Option<std::time::SystemTime>) {
+        *self.clock.lock().unwrap() =
+            vyd_core::capture_timing::CaptureClock::new(self.should_spill, latency, zero);
+    }
+
+    pub fn set_frame_zero(&self, utc: std::time::SystemTime) {
+        self.clock.lock().unwrap().set_frame_zero(utc);
     }
 
     pub fn clear_state_sender(&self) {
@@ -67,11 +80,20 @@ impl FrameBuffer {
         &self,
         frame_data: &[u8],
         timing_data: Option<Vec<(u64, String)>>,
+        timing: vyd_core::FrameTiming,
+        capture: Option<std::time::SystemTime>,
     ) -> Result<(), &'static str> {
         if frame_data.len() != self.frame_info.frame_size {
             return Err("Frame size mismatch");
         }
 
+        let frame = vyd_core::Frame::from_raw(
+            self.frame_info.width,
+            self.frame_info.height,
+            frame_data.to_vec(),
+        )
+        .map_err(|_| "Frame size mismatch")?;
+        let context = self.clock.lock().unwrap().ingest(frame, timing, capture);
         let mut buffer = self.buffer.lock().unwrap();
         let buffer_len = buffer.len();
 
@@ -109,7 +131,7 @@ impl FrameBuffer {
 
         // Add new frame at the back
         let frame_data = FrameData {
-            bytes: Bytes::copy_from_slice(frame_data),
+            context,
             timing_data,
         };
         buffer.push_back(frame_data);

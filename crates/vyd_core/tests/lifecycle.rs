@@ -26,7 +26,7 @@ impl FrameSource for Source {
         self.1 -= 1;
         Some(FrameContext::new(
             Frame::from_raw(1, 1, vec![0]).unwrap(),
-            self.1,
+            self.1 as u64,
         ))
     }
     fn try_next_frame(
