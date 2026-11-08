@@ -354,6 +354,7 @@ impl Pipeline {
     }
 
     pub fn run_with_outcome(self) -> Result<PipelineRun, VydError> {
+        let statistics = self.statistics.clone();
         let result = vyd_gstreamer::runtime::run_pipeline_with_gstreamer_nodes_outcome(
             self.context,
             self.stages,
@@ -371,10 +372,13 @@ impl Pipeline {
                     .dump_manager
                     .map(|manager| {
                         manager
-                            .publish(match termination {
-                                RunTermination::EndOfStream => RunStatus::Completed,
-                                RunTermination::Cancelled => RunStatus::Cancelled,
-                            })
+                            .publish_with_frame_count(
+                                match termination {
+                                    RunTermination::EndOfStream => RunStatus::Completed,
+                                    RunTermination::Cancelled => RunStatus::Cancelled,
+                                },
+                                statistics.snapshot().frame_count,
+                            )
                             .context("publish pipeline recording")
                     })
                     .transpose()?;

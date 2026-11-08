@@ -7,8 +7,10 @@ use std::time::Instant;
 use serde::Deserialize;
 use toml::Value;
 
+mod demand;
 mod services;
 mod session;
+pub use demand::PayloadRequest;
 pub use session::PipelineSession;
 pub(crate) mod timing;
 pub(crate) mod wrappers;
@@ -24,6 +26,7 @@ use crate::{FrameProcessorResult, VydError};
 pub type PipelineContextValue = Box<dyn Any + Send + Sync>;
 
 pub struct PipelineContext {
+    payload_demand: Arc<demand::PayloadDemand>,
     services: PipelineServices,
     frame_factory: FrameFactory,
     #[cfg(feature = "gpu-wgpu")]
@@ -89,6 +92,7 @@ impl Default for PipelineContext {
 impl PipelineContext {
     pub fn new() -> Self {
         Self {
+            payload_demand: Arc::default(),
             services: PipelineServices::default(),
             frame_factory: FrameFactory::default(),
             #[cfg(feature = "gpu-wgpu")]
@@ -110,6 +114,21 @@ impl PipelineContext {
     /// this context during migration; they are not copied into the registry.
     pub fn services(&self) -> &PipelineServices {
         &self.services
+    }
+
+    /// Request a payload from an earlier stage for as long as the returned
+    /// handle is held. Multiple requesters of the same type are independent.
+    ///
+    /// Stages can register initial demand in `pipeline_ctx_init`, including
+    /// stages that follow the provider. Changes made by a later stage during
+    /// frame processing become visible to earlier stages on subsequent frames.
+    pub fn request<T: 'static>(&self) -> PayloadRequest<T> {
+        self.payload_demand.request()
+    }
+
+    /// Whether any stage currently requests a payload of type `T`.
+    pub fn is_requested<T: 'static>(&self) -> bool {
+        self.payload_demand.is_requested::<T>()
     }
 
     /// Configure the per-pipeline CPU frame factory before stages start.
