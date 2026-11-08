@@ -100,11 +100,17 @@ fn published_summary_reports_stage_rows_and_file_size() {
         )
         .unwrap();
     manager.close_all().unwrap();
-    let summary = manager.publish(RunStatus::Completed).unwrap();
+    let summary = manager
+        .publish_with_frame_count(RunStatus::Completed, 2)
+        .unwrap();
     assert!(summary.directory.is_absolute());
     assert_eq!(summary.stages.len(), 1);
     assert_eq!(summary.stages[0].rows, 2);
     assert!(summary.stages[0].bytes > 0);
-    assert!(format!("{summary}").contains("2 frames"));
+    assert_eq!(summary.frame_count, Some(2));
+    assert!(format!("{summary}").contains("frames: 2"));
+    assert!(format!("{summary}").contains("2 rows"));
+    assert!(format!("{summary}").contains("kB)"));
+    assert!(!format!("{summary}").contains(" bytes"));
     std::fs::remove_dir_all(root).unwrap();
 }

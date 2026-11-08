@@ -23,6 +23,7 @@ pub struct DumpRunOptions {
 pub struct PublishedRun {
     pub directory: PathBuf,
     pub status: RunStatus,
+    pub frame_count: Option<u64>,
     pub stages: Vec<PublishedStage>,
 }
 
@@ -46,17 +47,35 @@ impl fmt::Display for PublishedRun {
                 RunStatus::Failed => "failed",
             }
         )?;
+        if let Some(frame_count) = self.frame_count {
+            writeln!(formatter, "  frames: {frame_count}")?;
+        }
         for stage in &self.stages {
             writeln!(
                 formatter,
-                "  {}: {} frames, {} bytes ({:.2} MiB)",
+                "  {}: {} rows ({})",
                 stage.file,
                 stage.rows,
-                stage.bytes,
-                stage.bytes as f64 / (1024.0 * 1024.0)
+                format_byte_size(stage.bytes),
             )?;
         }
         Ok(())
+    }
+}
+
+fn format_byte_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
+
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 999.5 && unit < UNITS.len() - 1 {
+        value /= 1_000.0;
+        unit += 1;
+    }
+    if value < 10.0 && unit > 0 {
+        format!("{value:.1} {}", UNITS[unit])
+    } else {
+        format!("{value:.0} {}", UNITS[unit])
     }
 }
 
@@ -283,6 +302,15 @@ impl DumpManager {
     }
 
     pub fn publish(&self, status: RunStatus) -> Result<PublishedRun> {
+        self.publish_with_frame_count(status, None)
+    }
+
+    pub fn publish_with_frame_count(
+        &self,
+        status: RunStatus,
+        frame_count: impl Into<Option<u64>>,
+    ) -> Result<PublishedRun> {
+        let frame_count = frame_count.into();
         anyhow::ensure!(status.is_replayable(), "cannot publish an incomplete run");
         let mut inner = self
             .0
@@ -337,6 +365,7 @@ impl DumpManager {
         Ok(PublishedRun {
             directory: inner.target.clone(),
             status,
+            frame_count,
             stages,
         })
     }

@@ -33,6 +33,18 @@ The `gpu-wgpu` feature enables managed GPU transfers and compute stages. Adjacen
 See [the design principles](https://github.com/sdd/vyd/blob/master/DESIGN_PRINCIPLES.md) for the API and runtime
 guidelines behind Vyd.
 
+## Request stage payloads on demand
+
+A downstream stage can call `ctx.request::<T>()` in `pipeline_ctx_init` and retain
+the returned `vyd::pipeline::PayloadRequest<T>` while it needs payload `T`. An
+earlier provider checks `ctx.is_requested::<T>()` before computing it. Requests
+from different stages are independent: dropping one handle withdraws only that
+stage's request. All stages finish initialization before the first frame, so
+requests made by later stages are visible to earlier providers from frame one.
+Changes made during a later stage's frame processing affect earlier stages on
+subsequent frames. This API records demand; the provider remains responsible for
+producing and attaching the payload.
+
 ## Run telemetry
 
 Applications can construct a run with `vyd::PipelineBuilder::from_config_file(path)`, optionally override its recording options, then call `build()?`. The returned `vyd::Pipeline` exposes `context_mut()`, a cloneable `statistics()` handle, and `cancellation_token()` before `run()` consumes it. The builder configures a GPU when any configured processor has `gpu = true`; this temporary convention does not depend on processor names. A build without `gpu-wgpu` reports that feature as required.
@@ -62,7 +74,9 @@ run_name = "feature-test"
 
 Relative `recording.dump_dir` values resolve from the working directory. `--dump-dir` and `--run-name` override their corresponding TOML values independently. `--replace-run` replaces the named run only after the new run completes or is cancelled cleanly; it accepts a run name from TOML or the CLI. Each recorded stage writes its own `.vortex` file under `dump-dir/NAME`; the same directory contains a versioned `manifest.json` and `run_statistics.json`. A failed or unfinished run remains in `.staging` and cannot be replayed. A clean cancellation publishes a finalized prefix.
 
-After the pipeline statistics, the example CLI prints the published directory and each stage file's frame count and size. Library callers can inspect the same data in `Pipeline::run_with_outcome()?.recording`.
+After the pipeline statistics, the example CLI prints the published directory,
+total frame count, and each stage file's row count and compact SI size. Library
+callers can inspect the same data in `Pipeline::run_with_outcome()?.recording`.
 
 The processor crate registers a `TypedStageCodec` for its stage type. Its row struct becomes separate Vortex columns for each named output. Every row also carries frame index, timestamps, dimensions, and continue/skip disposition. To replay, replace `dump = true` with `replay = "dumps/NAME/00-FeatureProcessor.vortex"` (relative paths resolve from the config file). Replay substitutes the processor, validates the finalized manifest and source file metadata, and checks each incoming frame's identity and geometry. Recording and replay currently support processor metadata only. Direct users of `vyd-core` can keep constructing a `PipelineContext` and calling its serial runner without a GStreamer dependency.
 
