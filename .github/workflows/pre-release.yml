@@ -15,7 +15,7 @@ jobs:
   release-pr:
     name: Prepare release PR
     if: github.repository == 'sdd/vyd'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
       pull-requests: write
@@ -37,7 +37,7 @@ jobs:
       - name: Install GStreamer headers and software Vulkan
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base libvulkan1 mesa-vulkan-drivers
       - name: Validate release inputs
-        run: cargo test --workspace --all-features --locked
+        run: cargo test --workspace --all-features --locked -- --test-threads=1
       - name: Prepare release PR
         uses: release-plz/action@v0.5
         with:
