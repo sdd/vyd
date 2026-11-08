@@ -12,7 +12,7 @@ jobs:
   release:
     name: Publish merged release PR
     if: github.repository == 'sdd/vyd' && github.event.pull_request.merged && github.event.pull_request.base.ref == 'master' && startsWith(github.event.pull_request.head.ref, 'release-plz-')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
       pull-requests: read
