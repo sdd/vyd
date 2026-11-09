@@ -1,6 +1,6 @@
 [package]
 name = "vyd-gstreamer"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 authors.workspace = true
 description = "GStreamer sources and sinks for Vyd video pipelines"

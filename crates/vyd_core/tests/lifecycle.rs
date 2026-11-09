@@ -64,28 +64,25 @@ impl FrameProcessor for Processor {
         }
         Ok(())
     }
-    fn process(&mut self, _: &mut FrameContext, _: &mut PipelineContext) -> FrameProcessorResult {
-        record(&self.events, "processor.process");
-        if self.skip {
-            FrameProcessorResult::Skip
-        } else {
-            FrameProcessorResult::Continue
-        }
-    }
-    fn pipeline_finished(&mut self, _: &mut PipelineContext) -> Result<(), VydError> {
-        record(&self.events, "processor.finish");
-        Err(error("finalizer failed"))
-    }
     fn try_process(
         &mut self,
-        frame: &mut FrameContext,
-        ctx: &mut PipelineContext,
+        _: &mut FrameContext,
+        _: &mut PipelineContext,
     ) -> Result<FrameProcessorResult, VydError> {
         if self.fail_process {
             record(&self.events, "processor.error");
             return Err(error("processor failed"));
         }
-        Ok(self.process(frame, ctx))
+        record(&self.events, "processor.process");
+        Ok(if self.skip {
+            FrameProcessorResult::Skip
+        } else {
+            FrameProcessorResult::Continue
+        })
+    }
+    fn pipeline_finished(&mut self, _: &mut PipelineContext) -> Result<(), VydError> {
+        record(&self.events, "processor.finish");
+        Err(error("finalizer failed"))
     }
     fn name(&self) -> &str {
         "processor"

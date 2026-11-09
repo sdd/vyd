@@ -38,11 +38,11 @@ impl FrameProcessor for DummyProcessor {
         Ok(())
     }
 
-    fn process(
+    fn try_process(
         &mut self,
         frame_ctx: &mut FrameContext,
         ctx: &mut PipelineContext,
-    ) -> FrameProcessorResult {
+    ) -> Result<FrameProcessorResult, VydError> {
         tracing::trace!(
             "Processor received frame with metadata keys: {:?}",
             frame_ctx.metadata.keys().collect::<Vec<_>>()
@@ -58,7 +58,7 @@ impl FrameProcessor for DummyProcessor {
             counter.fetch_add(1, Ordering::SeqCst);
         }
 
-        FrameProcessorResult::Continue
+        Ok(FrameProcessorResult::Continue)
     }
 
     fn name(&self) -> &str {

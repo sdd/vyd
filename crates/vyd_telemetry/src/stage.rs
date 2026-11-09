@@ -32,15 +32,6 @@ impl FrameProcessor for DumpingProcessor {
         self.inner.ports()
     }
 
-    fn process(
-        &mut self,
-        frame: &mut FrameContext,
-        context: &mut PipelineContext,
-    ) -> FrameProcessorResult {
-        self.try_process(frame, context)
-            .unwrap_or_else(|error| panic!("stage dump failed: {error}"))
-    }
-
     fn try_process(
         &mut self,
         frame: &mut FrameContext,
@@ -92,15 +83,6 @@ impl ReplayProcessor {
 impl FrameProcessor for ReplayProcessor {
     fn ports(&self) -> ProcessorPortSpecs {
         self.codec.ports()
-    }
-
-    fn process(
-        &mut self,
-        frame: &mut FrameContext,
-        context: &mut PipelineContext,
-    ) -> FrameProcessorResult {
-        self.try_process(frame, context)
-            .unwrap_or_else(|error| panic!("stage replay failed: {error}"))
     }
 
     fn try_process(
