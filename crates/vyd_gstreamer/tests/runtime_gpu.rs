@@ -73,9 +73,6 @@ impl FrameProcessor for Processor {
             }
         }
     }
-    fn process(&mut self, _: &mut FrameContext, _: &mut PipelineContext) -> FrameProcessorResult {
-        unreachable!("the fallible GPU test entry point is used")
-    }
     fn try_process(
         &mut self,
         frame: &mut FrameContext,

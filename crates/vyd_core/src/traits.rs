@@ -34,19 +34,12 @@ pub trait FrameProcessor: Send + Sync {
     fn ports(&self) -> ProcessorPortSpecs {
         ProcessorPortSpecs::default()
     }
-    fn process(
-        &mut self,
-        frame_ctx: &mut FrameContext,
-        ctx: &mut PipelineContext,
-    ) -> FrameProcessorResult;
-    /// Fallible runtime entry point. Skip remains a successful processing result.
+    /// Process one frame. `Skip` remains a successful processing result.
     fn try_process(
         &mut self,
         frame_ctx: &mut FrameContext,
         ctx: &mut PipelineContext,
-    ) -> Result<FrameProcessorResult, VydError> {
-        Ok(self.process(frame_ctx, ctx))
-    }
+    ) -> Result<FrameProcessorResult, VydError>;
     fn pipeline_ctx_init(&mut self, _ctx: &mut PipelineContext) -> Result<(), VydError> {
         Ok(())
     }

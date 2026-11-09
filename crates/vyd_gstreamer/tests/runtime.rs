@@ -116,40 +116,10 @@ impl FrameProcessor for Processor {
     fn ports(&self) -> ProcessorPortSpecs {
         self.ports.clone().unwrap_or_default()
     }
-    fn process(
-        &mut self,
-        frame: &mut FrameContext,
-        _: &mut PipelineContext,
-    ) -> FrameProcessorResult {
-        if frame.frame_index == 1 {
-            return FrameProcessorResult::Skip;
-        }
-        // Replace pixels and metadata: downstream must receive actual output.
-        let Frame::Cpu(cpu) = &frame.frame else {
-            panic!("expected CPU frame")
-        };
-        let (width, height) = cpu.dimensions();
-        if self.packed {
-            assert_eq!(&cpu.img.as_raw()[..], &[9; 8]);
-        }
-        if self.scaled {
-            assert_eq!((width, height), (8, 2));
-            assert_eq!(&cpu.img.as_raw()[..], &[9; 16]);
-        }
-        if self.scale_actual {
-            assert_eq!((width, height), (8, 2));
-            assert_eq!(&cpu.img.as_raw()[..], &[frame.frame_index as u8; 16]);
-        }
-        frame.frame =
-            Frame::from_raw(width, height, vec![42; width as usize * height as usize]).unwrap();
-        frame.put("tag", format!("processed-{}", frame.frame_index));
-        frame.put_typed(TypedTag(frame.frame_index + 100));
-        FrameProcessorResult::Continue
-    }
     fn try_process(
         &mut self,
         frame: &mut FrameContext,
-        ctx: &mut PipelineContext,
+        _ctx: &mut PipelineContext,
     ) -> Result<FrameProcessorResult, VydError> {
         if self.fail {
             Err(failure("processor error"))
@@ -161,8 +131,30 @@ impl FrameProcessor for Processor {
             let (width, height) = frame.frame.dimensions();
             frame.frame = Frame::from_raw(width, height, vec![7; (width * height) as usize])?;
             Ok(FrameProcessorResult::Continue)
+        } else if frame.frame_index == 1 {
+            Ok(FrameProcessorResult::Skip)
         } else {
-            Ok(self.process(frame, ctx))
+            // Replace pixels and metadata: downstream must receive actual output.
+            let Frame::Cpu(cpu) = &frame.frame else {
+                panic!("expected CPU frame")
+            };
+            let (width, height) = cpu.dimensions();
+            if self.packed {
+                assert_eq!(&cpu.img.as_raw()[..], &[9; 8]);
+            }
+            if self.scaled {
+                assert_eq!((width, height), (8, 2));
+                assert_eq!(&cpu.img.as_raw()[..], &[9; 16]);
+            }
+            if self.scale_actual {
+                assert_eq!((width, height), (8, 2));
+                assert_eq!(&cpu.img.as_raw()[..], &[frame.frame_index as u8; 16]);
+            }
+            frame.frame =
+                Frame::from_raw(width, height, vec![42; width as usize * height as usize])?;
+            frame.put("tag", format!("processed-{}", frame.frame_index));
+            frame.put_typed(TypedTag(frame.frame_index + 100));
+            Ok(FrameProcessorResult::Continue)
         }
     }
     fn pipeline_ctx_init(&mut self, _: &mut PipelineContext) -> Result<(), VydError> {
@@ -1049,18 +1041,18 @@ fn shutdown_timeout_retains_a_blocked_stage_until_it_can_be_finalized() {
         finished: mpsc::Sender<()>,
     }
     impl FrameProcessor for Blocker {
-        fn process(
+        fn try_process(
             &mut self,
             _: &mut FrameContext,
             _: &mut PipelineContext,
-        ) -> FrameProcessorResult {
+        ) -> Result<FrameProcessorResult, VydError> {
             self.entered.send(()).unwrap();
             let (lock, changed) = &*self.gate;
             let mut ready = lock.lock().unwrap();
             while !*ready {
                 ready = changed.wait(ready).unwrap();
             }
-            FrameProcessorResult::Continue
+            Ok(FrameProcessorResult::Continue)
         }
         fn pipeline_finished(&mut self, _: &mut PipelineContext) -> Result<(), VydError> {
             self.finished.send(()).unwrap();

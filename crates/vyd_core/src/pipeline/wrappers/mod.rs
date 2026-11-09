@@ -52,18 +52,6 @@ impl Stage<dyn FrameSource> {
 }
 
 impl Stage<dyn FrameProcessor> {
-    pub fn process(
-        &mut self,
-        frame_ctx: &mut FrameContext,
-        ctx: &mut PipelineContext,
-    ) -> FrameProcessorResult {
-        let _scope = stage_scope(ctx, self.stage_type);
-        let start_time = Instant::now();
-        let result = self.inner.process(frame_ctx, ctx);
-        record_duration(ctx, self.stage_type, start_time);
-        result
-    }
-
     pub fn try_process(
         &mut self,
         frame_ctx: &mut FrameContext,

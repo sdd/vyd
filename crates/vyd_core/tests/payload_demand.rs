@@ -58,16 +58,16 @@ impl FrameSource for Source {
 struct Provider(Arc<Mutex<Vec<bool>>>);
 
 impl FrameProcessor for Provider {
-    fn process(
+    fn try_process(
         &mut self,
         _: &mut FrameContext,
         context: &mut PipelineContext,
-    ) -> FrameProcessorResult {
+    ) -> Result<FrameProcessorResult, VydError> {
         self.0
             .lock()
             .unwrap()
             .push(context.is_requested::<Geometry>());
-        FrameProcessorResult::Continue
+        Ok(FrameProcessorResult::Continue)
     }
 
     fn name(&self) -> &str {
@@ -87,15 +87,15 @@ impl FrameProcessor for Consumer {
         Ok(())
     }
 
-    fn process(
+    fn try_process(
         &mut self,
         frame: &mut FrameContext,
         _: &mut PipelineContext,
-    ) -> FrameProcessorResult {
+    ) -> Result<FrameProcessorResult, VydError> {
         if frame.frame_index == 0 {
             self.0.take();
         }
-        FrameProcessorResult::Continue
+        Ok(FrameProcessorResult::Continue)
     }
 
     fn name(&self) -> &str {
